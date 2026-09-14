@@ -18,10 +18,22 @@ channels:
     type: BS
     channel: BS15_0
     services: [101]
+  # NHK BS4K.  StreamID is passthrough, not a serviceId.
+  # '45328' == '0xB110' as an opaque string.
+  - name: NHK-BS4K
+    type: BS4K
+    channel: '45328'
+    services: [101]
+  # BS8K NHK.  Disabled by default, removed by normalize.
+  - name: BS8K-NHK
+    type: BS4K
+    channel: '45280'
+    services: [102]
+    disabled: true
 
 tuners:
   - name: tuner
-    types: [GR, BS]
+    types: [GR, BS, BS4K]
     command: >-
       cat /dev/null
   - name: tracker

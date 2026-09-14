@@ -15,6 +15,18 @@ channels:
   - name: NHK-BS
     type: BS
     channel: BS15_0
+  # NHK BS4K.  StreamID is passthrough, not a serviceId.
+  # '45328' == '0xB110' as an opaque string.
+  - name: NHK-BS4K
+    type: BS4K
+    channel: '45328'
+    services: [101]
+  # BS8K NHK.  Disabled by default.
+  - name: BS8K-NHK
+    type: BS4K
+    channel: '45280'
+    services: [102]
+    disabled: true
 
 tuners:
   # Use a Mirakurun-compatible server as a tuner.
@@ -22,6 +34,11 @@ tuners:
     types: [GR, BS]
     command: >-
       curl 'http://mirakc:40772/api/channels/{{{channel_type}}}/{{{channel}}}/stream?decode=0' -sG
+  # Decoded-TLV remote server for BS4K.  Passthrough, no decode-filter needed.
+  - name: bs4k
+    types: [BS4K]
+    command: >-
+      curl 'http://192.168.1.133:40772/api/channels/{{{channel_type}}}/{{{channel}}}/stream?decode=0' -sG
   # Normally, you need to define a tuner for each device like below:
   #
   # - name: bs1

@@ -14,6 +14,8 @@ use crate::epg::EpgProgram;
 use crate::epg::EpgService;
 use crate::epg::QueryServices;
 use crate::error::Error;
+use crate::filter::is_tlv_passthrough;
+use crate::models::ChannelType;
 use crate::models::ProgramId;
 use crate::models::ServiceId;
 use crate::models::TunerUser;
@@ -166,6 +168,19 @@ where
             .iter()
             .filter(|(_, service)| config.matches(service));
         for (service_id, service) in iter {
+            // BS4K on-air tracking is explicitly disabled (see
+            // `should_skip_onair_tracking`).  Skip here with a clear log
+            // instead of running the TS-only `collect-eitpf` command against
+            // a TLV stream.
+            if should_skip_onair_tracking(service.channel.channel_type) {
+                tracing::warn!(
+                    tracker.name = self.name,
+                    service.id = %service_id,
+                    channel.type = ?service.channel.channel_type,
+                    "Skipping on-air tracking for BS4K (unsupported)",
+                );
+                continue;
+            }
             let result = self.update_onair_program(service, ctx).await;
             match (result, self.config.stream_id.is_some()) {
                 (Ok(_), _) => {
@@ -282,6 +297,20 @@ where
 }
 
 // helpers
+
+/// Returns true for channel types excluded from on-air program tracking.
+///
+/// Decision (H1): BS4K is explicitly excluded rather than given a
+/// `command-bs4k` (`collect-mh-eitpf`) path.  Reason: the local tracker
+/// expects TS EIT[p/f] sections 0/1 via `collect-eitpf`, and on-air tracking
+/// feeds the program-clock-based recording flow which is disabled for BS4K
+/// (clock sync disabled, program-level streaming/recording unsupported,
+/// channel/service passthrough only).  Adding an MH-EIT p/f path would imply
+/// program-level support that doesn't exist.  Revisit if/when program-level
+/// BS4K support lands.
+pub(crate) fn should_skip_onair_tracking(channel_type: ChannelType) -> bool {
+    is_tlv_passthrough(channel_type)
+}
 
 impl LocalOnairProgramTrackerConfig {
     pub fn matches(&self, service: &EpgService) -> bool {
@@ -524,6 +553,18 @@ mod tests {
         assert!(!config.matches(&gr13));
         assert!(!config.matches(&bs12));
         assert!(!config.matches(&bs13));
+    }
+
+    #[test]
+    fn test_bs4k_excluded_from_onair_tracking() {
+        // H1 decision: BS4K is explicitly excluded from on-air tracking
+        // (TS-only `collect-eitpf` cannot run against a TLV stream, and the
+        // program-clock-based flow it feeds is disabled for BS4K).
+        assert!(should_skip_onair_tracking(ChannelType::BS4K));
+        assert!(!should_skip_onair_tracking(ChannelType::GR));
+        assert!(!should_skip_onair_tracking(ChannelType::BS));
+        assert!(!should_skip_onair_tracking(ChannelType::CS));
+        assert!(!should_skip_onair_tracking(ChannelType::SKY));
     }
 
     #[test]

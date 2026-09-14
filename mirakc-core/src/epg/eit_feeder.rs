@@ -61,6 +61,11 @@ where
 
         EitCollector::new(
             self.config.jobs.update_schedules.command.clone(),
+            self.config
+                .jobs
+                .update_schedules
+                .command_for(ChannelType::BS4K)
+                .to_string(),
             self.config.jobs.update_schedules.timeout,
             channels,
             self.tuner_manager.clone(),
@@ -128,6 +133,7 @@ where
 
 pub struct EitCollector<T, E> {
     command: String,
+    command_bs4k: String,
     timeout: Duration,
     channels: Vec<EpgChannel>,
     tuner_manager: T,
@@ -150,6 +156,7 @@ where
 
     pub fn new(
         command: String,
+        command_bs4k: String,
         timeout: Duration,
         channels: Vec<EpgChannel>,
         tuner_manager: T,
@@ -157,6 +164,7 @@ where
     ) -> Self {
         EitCollector {
             command,
+            command_bs4k,
             timeout,
             channels,
             tuner_manager,
@@ -169,6 +177,7 @@ where
             Self::collect_eits_in_channel(
                 channel,
                 &self.command,
+                &self.command_bs4k,
                 self.timeout,
                 &self.tuner_manager,
                 &self.epg,
@@ -182,11 +191,23 @@ where
     async fn collect_eits_in_channel<C: Spawn>(
         channel: &EpgChannel,
         command: &str,
+        command_bs4k: &str,
         timeout: Duration,
         tuner_manager: &T,
         epg: &E,
         ctx: &C,
     ) -> Result<(), Error> {
+        // BS4K delivers MH-EIT over a TLV stream; use the MH variant.
+        // The arib fork normalizes table_ids to the TS-compatible range
+        // (MH 0x8B -> 0x50, basic 0x8C-0x93 -> 0x50-0x57,
+        // extended 0x94-0x9B -> 0x58-0x5F).  EitSection::is_valid()
+        // accepts the full 0x50-0x5F schedule range.  Timeout handling
+        // is shared with the 2K path.
+        let command = if channel.channel_type == ChannelType::BS4K {
+            command_bs4k
+        } else {
+            command
+        };
         tracing::debug!(channel.name, "Collecting EIT sections...");
 
         let user = TunerUser {
@@ -339,6 +360,7 @@ mod tests {
         let result = EitCollector::collect_eits_in_channel(
             &channel_gr!("channel", "0"),
             &config.jobs.update_schedules.command,
+            &config.jobs.update_schedules.command_bs4k,
             config.jobs.update_schedules.timeout,
             &tuner_stub,
             &epg_mock,
@@ -377,6 +399,7 @@ mod tests {
         let result = EitCollector::collect_eits_in_channel(
             &channel_gr!("channel", "0"),
             &config.jobs.update_schedules.command,
+            &config.jobs.update_schedules.command_bs4k,
             config.jobs.update_schedules.timeout,
             &tuner_stub,
             &epg_mock,
@@ -452,6 +475,7 @@ mod tests {
         let result = EitCollector::collect_eits_in_channel(
             &channel_gr!("channel", "0"),
             &config.jobs.update_schedules.command,
+            &config.jobs.update_schedules.command_bs4k,
             config.jobs.update_schedules.timeout,
             &tuner_stub,
             &epg_mock,
@@ -514,6 +538,7 @@ mod tests {
         let result = EitCollector::collect_eits_in_channel(
             &channel_gr!("channel", "0"),
             &config.jobs.update_schedules.command,
+            &config.jobs.update_schedules.command_bs4k,
             config.jobs.update_schedules.timeout,
             &tuner_stub,
             &epg_mock,
@@ -599,6 +624,147 @@ mod tests {
         let result = EitCollector::collect_eits_in_channel(
             &channel_gr!("channel", "0"),
             &config.jobs.update_schedules.command,
+            &config.jobs.update_schedules.command_bs4k,
+            config.jobs.update_schedules.timeout,
+            &tuner_stub,
+            &epg_mock,
+            &ctx,
+        )
+        .await;
+        assert_matches!(result, Ok(()));
+    }
+
+    #[test(tokio::test)]
+    async fn test_collect_eits_selects_command_per_channel_type() {
+        use crate::config::UpdateSchedulesJobConfig;
+
+        let config = serde_norway::from_str::<Config>(
+            r#"
+            channels:
+              - name: gr
+                type: GR
+                channel: '0'
+              - name: bs4k
+                type: BS4K
+                channel: '45168'
+            jobs:
+              update-schedules:
+                command: echo EITS
+                command-bs4k: echo MH-EITS
+        "#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.jobs.update_schedules.command_for(ChannelType::GR),
+            "echo EITS"
+        );
+        assert_eq!(
+            config.jobs.update_schedules.command_for(ChannelType::BS4K),
+            "echo MH-EITS"
+        );
+        // 2K default is unchanged, BS4K default is the MH variant.
+        assert!(!UpdateSchedulesJobConfig::default().command.contains("-mh-"));
+        assert!(
+            UpdateSchedulesJobConfig::default()
+                .command_for(ChannelType::BS4K)
+                .contains("collect-mh-eits")
+        );
+    }
+
+    #[test(tokio::test)]
+    async fn test_collect_eits_in_channel_bs4k() {
+        let section = EitSection {
+            original_network_id: 4.into(),
+            transport_stream_id: 5.into(),
+            service_id: 6.into(),
+            table_id: 0x50,
+            section_number: 0,
+            last_section_number: 0,
+            segment_last_section_number: 0,
+            version_number: 0,
+            events: vec![],
+        };
+        let json = serde_json::to_string(&section).unwrap();
+
+        let ctx = actlet::stubs::Context::default();
+
+        let tuner_stub = TunerManagerStub::default();
+
+        // The 2K command produces no output while the BS4K command emits a
+        // section, proving that the BS4K channel uses command-bs4k.
+        let config = Arc::new(
+            serde_norway::from_str::<Config>(&format!(
+                r#"
+            channels:
+              - name: bs4k
+                type: BS4K
+                channel: '45168'
+            jobs:
+              update-schedules:
+                command: false
+                command-bs4k: >-
+                  echo '{json}'
+        "#,
+            ))
+            .unwrap(),
+        );
+        let channel = channel!("bs4k", ChannelType::BS4K, "45168");
+        let mut epg_mock = MockEpg::new();
+        epg_mock
+            .0
+            .expect_emit_prepare_schedule()
+            .return_once(|msg| {
+                assert_eq!(msg.service_id, ServiceId::new(4.into(), 6.into()));
+            });
+        epg_mock
+            .0
+            .expect_emit_update_schedule()
+            .return_once(move |msg| {
+                assert_eq!(msg.section, section);
+            });
+        epg_mock.0.expect_emit_flush_schedule().return_once(|msg| {
+            assert_eq!(msg.service_id, ServiceId::new(4.into(), 6.into()));
+        });
+        let result = EitCollector::collect_eits_in_channel(
+            &channel,
+            &config.jobs.update_schedules.command,
+            &config.jobs.update_schedules.command_bs4k,
+            config.jobs.update_schedules.timeout,
+            &tuner_stub,
+            &epg_mock,
+            &ctx,
+        )
+        .await;
+        assert_matches!(result, Ok(()));
+
+        // And a GR channel keeps using the 2K command.
+        let config = Arc::new(
+            serde_norway::from_str::<Config>(&format!(
+                r#"
+            channels:
+              - name: gr
+                type: GR
+                channel: '0'
+            jobs:
+              update-schedules:
+                command: >-
+                  echo '{json}'
+                command-bs4k: false
+        "#,
+            ))
+            .unwrap(),
+        );
+        let mut epg_mock = MockEpg::new();
+        epg_mock
+            .0
+            .expect_emit_prepare_schedule()
+            .return_once(|_| {});
+        epg_mock.0.expect_emit_update_schedule().return_once(|_| {});
+        epg_mock.0.expect_emit_flush_schedule().return_once(|_| {});
+        let result = EitCollector::collect_eits_in_channel(
+            &channel_gr!("channel", "0"),
+            &config.jobs.update_schedules.command,
+            &config.jobs.update_schedules.command_bs4k,
             config.jobs.update_schedules.timeout,
             &tuner_stub,
             &epg_mock,

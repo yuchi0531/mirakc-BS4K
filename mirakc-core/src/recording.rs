@@ -44,6 +44,9 @@ use crate::epg::QueryService;
 use crate::error::Error;
 use crate::file_util;
 use crate::filter::FilterPipelineBuilder;
+use crate::filter::ensure_program_level_supported;
+use crate::filter::is_tlv_passthrough;
+use crate::models::ChannelType;
 use crate::models::ContentRange;
 use crate::models::ProgramId;
 use crate::models::ServiceId;
@@ -1081,6 +1084,14 @@ where
         let service_id = program_id.into();
         let schedule = self.schedules.get(&program_id).unwrap();
 
+        // BS4K program-level recording with a PCR clock is unsupported: clock
+        // synchronization is disabled for BS4K (TLV has no PCR clock concept),
+        // so `QueryClock` below would always fail with `ClockNotSynced`.
+        // Fail here with a clear message instead.  Channel/service passthrough
+        // only; program-level support is out of scope (dantto4k deferred,
+        // 1TLV1service passthrough policy).
+        ensure_program_level_supported(schedule.service.channel.channel_type)?;
+
         let clock = self.epg.call(QueryClock { service_id }).await??;
 
         let stream = self
@@ -1128,14 +1139,13 @@ where
             .insert("audio_tags", &audio_tags)?;
         let data = builder.build();
 
-        let mut builder = FilterPipelineBuilder::new(data, false);
-        builder.add_pre_filters(&self.config.pre_filters, &schedule.options.pre_filters)?;
-        if !stream.is_decoded() {
-            builder.add_decode_filter(&self.config.filters.decode_filter)?;
-        }
-        builder.add_program_filter(&self.config.filters.program_filter)?;
-        builder.add_post_filters(&self.config.post_filters, &schedule.options.post_filters)?;
-        let (filters, content_type, _) = builder.build();
+        let (filters, content_type, _) = build_recording_filters(
+            &self.config,
+            &schedule.options,
+            schedule.service.channel.channel_type,
+            stream.is_decoded(),
+            data,
+        )?;
 
         let now = Jst::now();
         let record_id = RecordId::from((now, program_id));
@@ -1232,6 +1242,31 @@ where
 
         Ok(())
     }
+}
+
+fn build_recording_filters(
+    config: &Config,
+    options: &RecordingOptions,
+    channel_type: ChannelType,
+    decoded: bool,
+    data: mustache::Data,
+) -> Result<(Vec<String>, String, bool), Error> {
+    // Same BS4K passthrough branch as the web/api streams
+    // (channels/stream.rs, services/stream.rs, programs/stream.rs):
+    // BS4K delivers decoded TLV passthrough from the tuner, so the TS-only
+    // decode/program filters must not touch the stream.  Pre/post filters
+    // explicitly listed by the user are still applied.  Content-Type stays
+    // `video/MP2T` for Mirakurun-client compatibility.
+    let mut builder = FilterPipelineBuilder::new(data, false);
+    builder.add_pre_filters(&config.pre_filters, &options.pre_filters)?;
+    if !is_tlv_passthrough(channel_type) {
+        if !decoded {
+            builder.add_decode_filter(&config.filters.decode_filter)?;
+        }
+        builder.add_program_filter(&config.filters.program_filter)?;
+    }
+    builder.add_post_filters(&config.post_filters, &options.post_filters)?;
+    Ok(builder.build())
 }
 
 // query records
@@ -4262,6 +4297,59 @@ mod tests {
         let mut pipeline: CommandPipeline<u8> = pipeline![format!("sh -c 'exit {EXIT_RETRY}'")];
         let results = pipeline.wait().await;
         assert!(check_retry(&results));
+    }
+
+    #[test]
+    fn test_build_recording_filters_bs4k_passthrough() {
+        use crate::models::ChannelType;
+
+        let temp_dir = TempDir::new().unwrap();
+        let mut config = Config::default();
+        config.filters.decode_filter.command = "echo decode".to_string();
+        config.filters.program_filter.command = "echo program".to_string();
+        let _ = temp_dir;
+        let options = recording_options!(0);
+
+        // GR keeps the TS-only decode/program filters.
+        let data = mustache::MapBuilder::new().build();
+        let (filters, content_type, _) =
+            build_recording_filters(&config, &options, ChannelType::GR, false, data).unwrap();
+        assert_eq!(filters.len(), 2);
+        assert_eq!(content_type, "video/MP2T");
+
+        // Decoded GR skips only the decode filter.
+        let data = mustache::MapBuilder::new().build();
+        let (filters, _, _) =
+            build_recording_filters(&config, &options, ChannelType::GR, true, data).unwrap();
+        assert_eq!(filters.len(), 1);
+
+        // BS4K skips both decode and program filters even when not decoded,
+        // same as the web/api channel/service/program streams.
+        for decoded in [false, true] {
+            let data = mustache::MapBuilder::new().build();
+            let (filters, content_type, _) =
+                build_recording_filters(&config, &options, ChannelType::BS4K, decoded, data)
+                    .unwrap();
+            assert!(
+                filters.is_empty(),
+                "BS4K passthrough must add no builtin filters (decoded={decoded})"
+            );
+            assert_eq!(content_type, "video/MP2T");
+        }
+    }
+
+    #[test]
+    fn test_bs4k_program_recording_is_explicitly_unsupported() {
+        use crate::filter::ensure_program_level_supported;
+        use crate::models::ChannelType;
+
+        assert_matches!(
+            ensure_program_level_supported(ChannelType::BS4K),
+            Err(Error::InvalidRequest(msg)) => {
+                assert!(msg.contains("BS4K"));
+            }
+        );
+        assert!(ensure_program_level_supported(ChannelType::GR).is_ok());
     }
 
     #[test(tokio::test)]

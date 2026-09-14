@@ -1,6 +1,7 @@
 use super::*;
 
 use crate::epg::EpgChannel;
+use crate::filter::is_tlv_passthrough;
 use crate::web::api::stream::StreamingHeaderParams;
 use crate::web::api::stream::do_head_stream;
 use crate::web::api::stream::streaming;
@@ -201,10 +202,17 @@ fn build_filters(
 
     let mut builder = FilterPipelineBuilder::new(data, false); // not seekable
     builder.add_pre_filters(&config.pre_filters, &filter_setting.pre_filters)?;
-    if !decoded && filter_setting.decode {
-        builder.add_decode_filter(&config.filters.decode_filter)?;
+    // BS4K delivers decoded TLV passthrough (1 TLV = 1 service) from the
+    // tuner without modification, like MMirakurun.  mirakc-arib
+    // service/decode filters are TS-only and must not touch the stream, so
+    // skip both even when `decode=true`.  Content-Type stays `video/MP2T`
+    // for Mirakurun-client compatibility.
+    if !is_tlv_passthrough(channel.channel_type) {
+        if !decoded && filter_setting.decode {
+            builder.add_decode_filter(&config.filters.decode_filter)?;
+        }
+        builder.add_service_filter(&config.filters.service_filter)?;
     }
-    builder.add_service_filter(&config.filters.service_filter)?;
     builder.add_post_filters(&config.post_filters, &filter_setting.post_filters)?;
     Ok(builder.build())
 }
