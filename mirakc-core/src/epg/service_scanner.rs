@@ -307,12 +307,12 @@ mod tests {
             config.jobs.scan_services.command_for(ChannelType::BS4K),
             "echo BS4K"
         );
-        // 2K default is unchanged, BS4K default is the TLV variant.
+        // 2K default is unchanged, BS4K default uses the fork binary.
         assert!(!ScanServicesJobConfig::default().command.contains("-tlv"));
         assert!(
             ScanServicesJobConfig::default()
                 .command_for(ChannelType::BS4K)
-                .contains("scan-services-tlv")
+                .contains("mirakc-arib-tlv scan-services-tlv")
         );
     }
 
@@ -394,11 +394,11 @@ mod tests {
             assert_eq!(services.len(), 1);
         });
 
-        // Default BS4K template is the TLV variant.
+        // Default BS4K template uses the TLV fork binary.
         assert!(
             ScanServicesJobConfig::default()
                 .command_for(ChannelType::BS4K)
-                .contains("scan-services-tlv")
+                .contains("mirakc-arib-tlv scan-services-tlv")
         );
     }
 }

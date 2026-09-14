@@ -41,6 +41,7 @@ suitable for your environment.
 | [post-filters.\*.content-type]           | `None`                            |
 | [post-filters.\*.seekable]               | `false`                           |
 | [jobs.scan-services.command]             | `mirakc-arib scan-services{{#sids}} --sids={{{.}}}{{/sids}}{{#xsids}} --xsids={{{.}}}{{/xsids}}` |
+| [jobs.scan-services.command-bs4k]        | `mirakc-arib-tlv scan-services-tlv{{#sids}} --sids={{{.}}}{{/sids}}{{#xsids}} --xsids={{{.}}}{{/xsids}}` |
 | [jobs.scan-services.schedule]            | `0 1 8,20 * * * *` (execute at 08:01 and 20:01 every day) |
 | [jobs.scan-services.timeout]             | `30s`                             |
 | [jobs.scan-services.disabled]            | `false`                           |
@@ -49,6 +50,7 @@ suitable for your environment.
 | [jobs.sync-clocks.timeout]               | `30s`                             |
 | [jobs.sync-clocks.disabled]              | `false`                           |
 | [jobs.update-schedules.command]          | `mirakc-arib collect-eits{{#sids}} --sids={{{.}}}{{/sids}}{{#xsids}} --xsids={{{.}}}{{/xsids}}` |
+| [jobs.update-schedules.command-bs4k]     | `mirakc-arib-tlv collect-mh-eits --time-limit=90{{#sids}} --sids={{{.}}}{{/sids}}{{#xsids}} --xsids={{{.}}}{{/xsids}}` |
 | [jobs.update-schedules.schedule]         | `0 21 8,20 * * * *` (execute at 08:21 and 20:21 every day) |
 | [jobs.update-schedules.timeout]          | `10m`                             |
 | [jobs.update-schedules.disabled]         | `false`                           |
@@ -103,6 +105,7 @@ suitable for your environment.
 [post-filters.\*.content-type]: #post-filters
 [post-filters.\*.seekable]: #post-filters
 [jobs.scan-services.command]: #jobsscan-services
+[jobs.scan-services.command-bs4k]: #jobsscan-services
 [jobs.scan-services.schedule]: #jobsscan-services
 [jobs.scan-services.timeout]: #jobsscan-services
 [jobs.scan-services.disabled]: #jobsscan-services
@@ -111,6 +114,7 @@ suitable for your environment.
 [jobs.sync-clocks.timeout]: #jobssync-clocks
 [jobs.sync-clocks.disabled]: #jobssync-clocks
 [jobs.update-schedules.command]: #jobsupdate-schedules
+[jobs.update-schedules.command-bs4k]: #jobsupdate-schedules
 [jobs.update-schedules.schedule]: #jobsupdate-schedules
 [jobs.update-schedules.timeout]: #jobsupdate-schedules
 [jobs.update-schedules.disabled]: #jobsupdate-schedules
@@ -1000,9 +1004,28 @@ Each job definition has the following properties:
 
 * command
   * A Mustache template string of a command
+* command-bs4k
+  * A Mustache template string of a command used for BS4K channels instead
+    of `command`
+  * Only `jobs.scan-services` and `jobs.update-schedules` have this property
 * schedule
   * A crontab expression of the job schedule
   * See https://crates.io/crates/cron for details of the format
+
+`command-bs4k` is needed only when at least one BS4K channel is defined in
+`channels`.  A configuration without BS4K channels is not required to install
+the BS4K-specific binary.  When a BS4K channel is defined, the program of
+`command-bs4k` must be available at startup, otherwise mirakc exits with an
+error telling which command is missing.
+
+The default `command-bs4k` values call `mirakc-arib-tlv`, a separate binary
+providing the BS4K/TLV commands (`scan-services-tlv`, `collect-mh-eits` and
+`collect-mh-eitpf`).  It is **not** included in the upstream `mirakc-arib`
+binary.  Install it with `cargo install --git
+https://github.com/yuchi0531/mirakc-arib-tlv`, or use the Docker images built
+from this repository (debian/alpine) which bundle `mirakc-arib-tlv` v0.1.0.
+Do not replace `mirakc-arib` with a symlink to `mirakc-arib-tlv`; the 2K/ISDB
+jobs need the upstream binary.
 
 ### jobs.scan-services
 
@@ -1012,6 +1035,10 @@ The scan-services job scans audio/video services in channels defined in the
 The command must read TS packets from `stdin`, and output the result to `stdout`
 in a specific JSON format.  See the help shown by `mirakc-arib scan-services -h`
 for details of the JSON format.
+
+For BS4K channels, the command must read decoded TLV packets from `stdin` and
+output the same JSON format.  See the help shown by
+`mirakc-arib-tlv scan-services-tlv -h` for details.
 
 Command template variables:
 
@@ -1042,6 +1069,15 @@ The update-schedules job updates EPG schedules for each service.
 The command must read TS packets from `stdin`, and output the result to `stdout`
 in a specific JSON format.  See the help shown by `mirakc-arib collect-eits -h`
 for details of the JSON format.
+
+For BS4K channels, the command must read decoded TLV packets from `stdin` and
+output MH-EIT sections in the same JSON format.  See the help shown by
+`mirakc-arib-tlv collect-mh-eits -h` for details.
+
+The default BS4K command includes `--time-limit=90`.  `collect-mh-eits` reads
+a live pipe until it exits, and mirakc kills it at the job timeout (`10m` by
+default) without this option.  The limit releases the tuner earlier; increase
+it if a longer collection window is needed.
 
 Command template variables:
 

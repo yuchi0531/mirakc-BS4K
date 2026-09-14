@@ -19,6 +19,7 @@ test_images() {
     docker run --rm --platform=$PLATFORM --entrypoint=recdvb $MIRAKC_IMAGE --version
     docker run --rm --platform=$PLATFORM --entrypoint=recpt1 $MIRAKC_IMAGE --version
     docker run --rm --platform=$PLATFORM --entrypoint=mirakc-arib $MIRAKC_IMAGE --version
+    docker run --rm --platform=$PLATFORM --entrypoint=mirakc-arib-tlv $MIRAKC_IMAGE --version
     docker run --rm --platform=$PLATFORM --entrypoint=dvbv5-zap $MIRAKC_IMAGE --version
 
     echo "Testing $TIMESHIFT_FS_IMAGE for $PLATFORM..."
@@ -42,6 +43,7 @@ ld_debug() {
   docker run --rm --platform=$3 -e LD_DEBUG=files --entrypoint=recdvb $1 --version
   docker run --rm --platform=$3 -e LD_DEBUG=files --entrypoint=recpt1 $1 --version
   docker run --rm --platform=$3 -e LD_DEBUG=files --entrypoint=mirakc-arib $1 --version
+  docker run --rm --platform=$3 -e LD_DEBUG=files --entrypoint=mirakc-arib-tlv $1 --version
   docker run --rm --platform=$3 -e LD_DEBUG=files --entrypoint=mirakc-timeshift-fs $2 --version
 }
 

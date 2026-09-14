@@ -662,13 +662,14 @@ mod tests {
             config.jobs.update_schedules.command_for(ChannelType::BS4K),
             "echo MH-EITS"
         );
-        // 2K default is unchanged, BS4K default is the MH variant.
+        // 2K default is unchanged, BS4K default is the MH variant of the
+        // fork binary with a bounded collection window.
         assert!(!UpdateSchedulesJobConfig::default().command.contains("-mh-"));
-        assert!(
-            UpdateSchedulesJobConfig::default()
-                .command_for(ChannelType::BS4K)
-                .contains("collect-mh-eits")
-        );
+        let bs4k = UpdateSchedulesJobConfig::default()
+            .command_for(ChannelType::BS4K)
+            .to_string();
+        assert!(bs4k.contains("mirakc-arib-tlv collect-mh-eits"));
+        assert!(bs4k.contains("--time-limit=90"));
     }
 
     #[test(tokio::test)]

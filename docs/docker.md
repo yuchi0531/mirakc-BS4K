@@ -46,6 +46,11 @@ The images built from this repository also contain the bundled [miraview] Web UI
 at `/usr/share/miraview`.  See [docs/web-ui.md](./web-ui.md) about how to serve
 it via `server.mounts`.
 
+They also bundle [mirakc-arib-tlv] v0.1.0, which provides the BS4K/TLV commands
+(`scan-services-tlv`, `collect-mh-eits` and `collect-mh-eitpf`).  It is used by
+the default `jobs.*.command-bs4k` templates.  See [docs/config.md](./config.md)
+for details.
+
 ## Build a custom image
 
 ### Install additional software
@@ -127,6 +132,7 @@ See the following page for details about `BUILDPLATFORM` and `TARGETPLATFORM`:
 [recdvb]: http://cgi1.plala.or.jp/~sat/?x=entry:entry180805-164428
 [recpt1]: https://github.com/stz2012/recpt1
 [mirakc-arib]: https://github.com/mirakc/mirakc-arib
+[mirakc-arib-tlv]: https://github.com/yuchi0531/mirakc-arib-tlv
 [curl]: https://curl.haxx.se/docs/manpage.html
 [jq]: https://stedolan.github.io/jq/
 [socat]: http://www.dest-unreach.org/socat/doc/socat.html

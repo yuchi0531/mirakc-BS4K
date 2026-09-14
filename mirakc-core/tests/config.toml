@@ -51,6 +51,12 @@ command = "cat /dev/null"
 [filters.decode-filter]
 command = "cat /dev/null"
 
+[jobs.scan-services]
+command-bs4k = "true"
+
+[jobs.update-schedules]
+command-bs4k = "true"
+
 [recording]
 basedir = "/tmp"
 

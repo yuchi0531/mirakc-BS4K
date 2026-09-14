@@ -103,6 +103,7 @@ check-mirakc-image:
 	docker run --rm --platform=$(PLATFORM) --entrypoint=recdvb mirakc/mirakc:$(PREFIX)-$(DISTRO) --version
 	docker run --rm --platform=$(PLATFORM) --entrypoint=recpt1 mirakc/mirakc:$(PREFIX)-$(DISTRO) --version
 	docker run --rm --platform=$(PLATFORM) --entrypoint=mirakc-arib mirakc/mirakc:$(PREFIX)-$(DISTRO) --version
+	docker run --rm --platform=$(PLATFORM) --entrypoint=mirakc-arib-tlv mirakc/mirakc:$(PREFIX)-$(DISTRO) --version
 	docker run --rm --platform=$(PLATFORM) --entrypoint=dvbv5-zap mirakc/mirakc:$(PREFIX)-$(DISTRO) --version
 
 .PHONE: check-timeshift-fs-image

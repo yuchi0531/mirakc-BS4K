@@ -34,6 +34,9 @@ channels:
     services: [102]
     disabled: true
 
+  # BS4K EPG jobs use the bundled `mirakc-arib-tlv` by default (no setup
+  # needed); override `jobs.update-schedules.command-bs4k` to change options.
+
 tuners:
   # Use a Mirakurun-compatible server as a tuner.
   - name: mirakc
