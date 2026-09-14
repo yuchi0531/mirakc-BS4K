@@ -46,6 +46,12 @@ filters:
     command: >-
       cat /dev/null
 
+jobs:
+  scan-services:
+    command-bs4k: 'true'
+  update-schedules:
+    command-bs4k: 'true'
+
 recording:
   basedir: /tmp
 

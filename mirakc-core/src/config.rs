@@ -284,6 +284,16 @@ impl Config {
             .iter()
             .for_each(|(name, config)| config.validate(name));
         self.jobs.validate();
+        // The BS4K-specific binaries are required only when at least one
+        // BS4K channel is defined.  A 2K-only configuration must not fail
+        // even if mirakc-arib-tlv is not installed.
+        if self
+            .channels
+            .iter()
+            .any(|channel| channel.channel_type == ChannelType::BS4K)
+        {
+            self.jobs.validate_bs4k_commands();
+        }
         self.recording.validate();
         self.onair_program_trackers
             .iter()
@@ -873,6 +883,15 @@ impl JobsConfig {
         self.sync_clocks.validate();
         self.update_schedules.validate();
     }
+
+    /// Validates that the programs of `command-bs4k` are available.
+    ///
+    /// Called only when at least one BS4K channel is defined.  A 2K-only
+    /// configuration does not need the BS4K-specific binary.
+    fn validate_bs4k_commands(&self) {
+        self.scan_services.validate_bs4k_command();
+        self.update_schedules.validate_bs4k_command();
+    }
 }
 
 // NOTE: We cannot use any macros to generate a constant string such as `concat!()` in
@@ -969,8 +988,12 @@ macro_rules! define_job_config {
                             ".command-bs4k: must be a non-empty string"
                         ),
                     );
+                    // Only the syntax is validated here.  Whether the
+                    // program is available is checked by
+                    // `validate_bs4k_command()` which is called only when
+                    // at least one BS4K channel is defined.
                     validate!(
-                        is_valid_command(&self.command_bs4k),
+                        is_parseable_command(&self.command_bs4k),
                         concat!(
                             "config.jobs.",
                             $label,
@@ -982,6 +1005,27 @@ macro_rules! define_job_config {
                         concat!("config.jobs.", $label, ".schedule: not valid"),
                     );
                 }
+            }
+
+            /// Validates that the program of `command_bs4k` is available.
+            ///
+            /// This is separated from `validate()` so that a 2K-only
+            /// configuration does not require the BS4K-specific binary.
+            /// Called only when at least one BS4K channel is defined.
+            fn validate_bs4k_command(&self) {
+                if self.disabled {
+                    return;
+                }
+                validate!(
+                    is_valid_command(&self.command_bs4k),
+                    concat!(
+                        "config.jobs.",
+                        $label,
+                        ".command-bs4k: '{}' is not available; install \
+                         mirakc-arib-tlv or set command-bs4k explicitly"
+                    ),
+                    command_program(&self.command_bs4k).unwrap_or_default(),
+                );
             }
         }
 
@@ -1095,7 +1139,7 @@ define_job_config! {
     "ScanServicesJobConfig::default_timeout" =>
         Duration::from_secs(30),
     "ScanServicesJobConfig::default_command_for_bs4k" =>
-        "mirakc-arib scan-services-tlv\
+        "mirakc-arib-tlv scan-services-tlv\
          {{#sids}} --sids={{{.}}}{{/sids}}\
          {{#xsids}} --xsids={{{.}}}{{/xsids}}",
 }
@@ -1127,8 +1171,13 @@ define_job_config! {
     // TODO(refactor): use Duration::from_mins(1) once it's stabilized.
     "UpdateSchedulesJobConfig::default_timeout" =>
         Duration::from_secs(600), // 10m
+    // NOTE: `--time-limit=90` is part of the default on purpose.  Without
+    // it, `collect-mh-eits` reads a live pipe until mirakc stops it (the
+    // job timeout, 10m by default).  The job is a periodic EPG collection
+    // and does not need the whole window, so stop early and release the
+    // tuner.  Override `command-bs4k` if a longer window is required.
     "UpdateSchedulesJobConfig::default_command_for_bs4k" =>
-        "mirakc-arib collect-mh-eits\
+        "mirakc-arib-tlv collect-mh-eits --time-limit=90\
          {{#sids}} --sids={{{.}}}{{/sids}}\
          {{#xsids}} --xsids={{{.}}}{{/xsids}}",
 }
@@ -1589,21 +1638,31 @@ impl Default for ResourceConfig {
 }
 
 fn is_valid_command(command: &str) -> bool {
-    let words = match shell_words::split(command) {
-        Ok(words) => words,
-        Err(_) => return false,
+    let prog = match command_program(command) {
+        Some(prog) => prog,
+        None => return false,
     };
 
-    let prog = match words.split_first() {
-        Some((prog, _)) => prog,
-        _ => return false,
-    };
-
-    if Path::new(prog).is_executable() {
+    if Path::new(&prog).is_executable() {
         return true;
     }
 
     which::which(prog).is_ok()
+}
+
+/// Returns the program name of a command, or `None` if the command cannot
+/// be parsed with shell-like word splitting.
+fn command_program(command: &str) -> Option<String> {
+    let words = shell_words::split(command).ok()?;
+    let (prog, _) = words.split_first()?;
+    Some(prog.clone())
+}
+
+/// Returns true if the command is syntactically valid, i.e. non-empty and
+/// parseable.  Whether the program is available is not checked.  Used by
+/// jobs which are validated conditionally (e.g. `command-bs4k`).
+fn is_parseable_command(command: &str) -> bool {
+    command_program(command).is_some()
 }
 
 #[allow(clippy::field_reassign_with_default)]
@@ -3425,8 +3484,26 @@ mod tests {
                 #[should_panic(expected = "command-bs4k: must be a valid command")]
                 fn [<test_ $label _job_config_validate_command_bs4k>]() {
                     let mut config = [<$label _job_config>]();
-                    config.command_bs4k = "no-such-command".to_string();
+                    // An unparseable command is rejected regardless of
+                    // whether a BS4K channel is defined.
+                    config.command_bs4k = "echo 'unterminated".to_string();
                     config.validate();
+                }
+
+                #[test]
+                #[should_panic(expected = "command-bs4k: 'no-such-command' is not available")]
+                fn [<test_ $label _job_config_validate_bs4k_command>]() {
+                    let mut config = [<$label _job_config>]();
+                    config.command_bs4k = "no-such-command".to_string();
+                    config.validate_bs4k_command();
+                }
+
+                #[test]
+                fn [<test_ $label _job_config_validate_bs4k_command_disabled>]() {
+                    let mut config = [<$label _job_config>]();
+                    config.command_bs4k = "no-such-command".to_string();
+                    config.disabled = true;
+                    config.validate_bs4k_command();
                 }
 
                 #[test]
@@ -3463,11 +3540,14 @@ mod tests {
              {{#sids}} --sids={{{.}}}{{/sids}}\
              {{#xsids}} --xsids={{{.}}}{{/xsids}}"
         );
-        // BS4K default uses the TLV variant with --sids/--xsids support.
+        // BS4K default uses the TLV fork binary with --sids/--xsids support.
         let bs4k = ScanServicesJobConfig::default_command_for_bs4k();
-        assert!(bs4k.contains("scan-services-tlv"));
-        assert!(bs4k.contains("--sids"));
-        assert!(bs4k.contains("--xsids"));
+        assert_eq!(
+            bs4k,
+            "mirakc-arib-tlv scan-services-tlv\
+             {{#sids}} --sids={{{.}}}{{/sids}}\
+             {{#xsids}} --xsids={{{.}}}{{/xsids}}"
+        );
 
         let config = ScanServicesJobConfig::default();
         assert_eq!(config.command_for(ChannelType::GR), config.command.as_str());
@@ -3501,11 +3581,15 @@ mod tests {
              {{#sids}} --sids={{{.}}}{{/sids}}\
              {{#xsids}} --xsids={{{.}}}{{/xsids}}"
         );
-        // BS4K default uses the MH-EIT variant with --sids/--xsids support.
+        // BS4K default uses the MH-EIT variant with --sids/--xsids support
+        // and a bounded collection window (--time-limit).
         let bs4k = UpdateSchedulesJobConfig::default_command_for_bs4k();
-        assert!(bs4k.contains("collect-mh-eits"));
-        assert!(bs4k.contains("--sids"));
-        assert!(bs4k.contains("--xsids"));
+        assert_eq!(
+            bs4k,
+            "mirakc-arib-tlv collect-mh-eits --time-limit=90\
+             {{#sids}} --sids={{{.}}}{{/sids}}\
+             {{#xsids}} --xsids={{{.}}}{{/xsids}}"
+        );
 
         let config = UpdateSchedulesJobConfig::default();
         assert_eq!(config.command_for(ChannelType::GR), config.command.as_str());
@@ -3523,6 +3607,147 @@ mod tests {
             config.command_bs4k,
             UpdateSchedulesJobConfig::default_command_for_bs4k()
         );
+    }
+
+    // Overrides all non-BS4K commands with `true` so that the config-level
+    // tests do not depend on mirakc-arib being installed.  The command-bs4k
+    // values stay untouched.
+    fn use_stub_commands(config: &mut Config) {
+        config.filters.service_filter.command = "true".to_string();
+        config.filters.program_filter.command = "true".to_string();
+        config.timeshift.command = "true".to_string();
+        config.jobs.scan_services.command = "true".to_string();
+        config.jobs.sync_clocks.command = "true".to_string();
+        config.jobs.update_schedules.command = "true".to_string();
+    }
+
+    #[test]
+    fn test_config_validate_bs4k_command_without_bs4k_channel() {
+        // A 2K-only configuration must load even if mirakc-arib-tlv is not
+        // installed.  Only the syntax of command-bs4k is validated.
+        let mut config = serde_norway::from_str::<Config>(
+            r#"
+            channels:
+              - name: gr
+                type: GR
+                channel: '0'
+            jobs:
+              scan-services:
+                command-bs4k: no-such-command
+              update-schedules:
+                command-bs4k: no-such-command
+            resource:
+              strings-yaml: /bin/sh
+        "#,
+        )
+        .unwrap();
+        use_stub_commands(&mut config);
+        config.validate(true);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "config.jobs.scan-services.command-bs4k: 'no-such-command' is not \
+                    available; install mirakc-arib-tlv or set command-bs4k explicitly"
+    )]
+    fn test_config_validate_bs4k_command_with_bs4k_channel_scan_services() {
+        let mut config = serde_norway::from_str::<Config>(
+            r#"
+            channels:
+              - name: bs4k
+                type: BS4K
+                channel: '45168'
+            jobs:
+              scan-services:
+                command-bs4k: no-such-command
+            resource:
+              strings-yaml: /bin/sh
+        "#,
+        )
+        .unwrap();
+        use_stub_commands(&mut config);
+        config.validate(true);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "config.jobs.update-schedules.command-bs4k: 'no-such-command' is not \
+                    available; install mirakc-arib-tlv or set command-bs4k explicitly"
+    )]
+    fn test_config_validate_bs4k_command_with_bs4k_channel_update_schedules() {
+        let mut config = serde_norway::from_str::<Config>(
+            r#"
+            channels:
+              - name: bs4k
+                type: BS4K
+                channel: '45168'
+            jobs:
+              update-schedules:
+                command-bs4k: no-such-command
+            resource:
+              strings-yaml: /bin/sh
+        "#,
+        )
+        .unwrap();
+        use_stub_commands(&mut config);
+        // The scan-services default is not the subject of this test.
+        config.jobs.scan_services.command_bs4k = "true".to_string();
+        config.validate(true);
+    }
+
+    #[test]
+    fn test_config_validate_bs4k_command_explicit() {
+        // An explicitly configured command-bs4k is used as-is, even if it
+        // does not look like the default fork command.
+        let mut config = serde_norway::from_str::<Config>(
+            r#"
+            channels:
+              - name: bs4k
+                type: BS4K
+                channel: '45168'
+            jobs:
+              scan-services:
+                command-bs4k: 'false'
+              update-schedules:
+                command-bs4k: 'false'
+            resource:
+              strings-yaml: /bin/sh
+        "#,
+        )
+        .unwrap();
+        use_stub_commands(&mut config);
+        config.validate(true);
+        assert_eq!(
+            config.jobs.scan_services.command_for(ChannelType::BS4K),
+            "false"
+        );
+        assert_eq!(
+            config.jobs.update_schedules.command_for(ChannelType::BS4K),
+            "false"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "config.jobs.scan-services.command-bs4k: must be a valid command")]
+    fn test_config_validate_bs4k_command_unparseable() {
+        // Syntax validation is unconditional.  'unterminated quote' cannot
+        // be split by shell_words even when no BS4K channel is defined.
+        let mut config = serde_norway::from_str::<Config>(
+            r#"
+            channels:
+              - name: gr
+                type: GR
+                channel: '0'
+            jobs:
+              scan-services:
+                command-bs4k: "echo 'unterminated"
+            resource:
+              strings-yaml: /bin/sh
+        "#,
+        )
+        .unwrap();
+        use_stub_commands(&mut config);
+        config.validate(true);
     }
 
     #[test]

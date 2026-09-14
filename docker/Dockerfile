@@ -26,10 +26,20 @@ ARG TARGETPLATFORM
 ARG PROFILE=release
 RUN sh ./docker/build-scripts/mirakc.sh $BUILDPLATFORM $TARGETPLATFORM $PROFILE
 
+# Build mirakc-arib-tlv (BS4K/TLV commands) from source.  It is a separate
+# crate and not part of the Rust workspace.
+# See https://github.com/yuchi0531/mirakc-arib-tlv for details.
+FROM --platform=$BUILDPLATFORM mirakc/buildenv:debian-$DEBIAN_CODENAME-$TARGETOS-$TARGETARCH$TARGETVARIANT AS mirakc-arib-tlv-build
+COPY ./docker/build-scripts/vars.* ./docker/build-scripts/mirakc-arib-tlv.sh /build-scripts/
+ARG BUILDPLATFORM
+ARG TARGETPLATFORM
+RUN sh /build-scripts/mirakc-arib-tlv.sh $BUILDPLATFORM $TARGETPLATFORM
+
 FROM debian:$DEBIAN_CODENAME-slim AS mirakc-debian
 LABEL maintainer="Contributors of mirakc"
 COPY --from=mirakc-tools /usr/local/bin /usr/local/bin/
 COPY --from=mirakc-build /usr/local/bin/mirakc /usr/local/bin/
+COPY --from=mirakc-arib-tlv-build /usr/local/bin/mirakc-arib-tlv /usr/local/bin/
 COPY --from=mirakc-build /build/resources/strings.yml /etc/mirakc/strings.yml
 ARG PROFILE=release
 RUN --mount=type=bind,source=./docker/build-scripts,target=/build-scripts/ \
@@ -76,6 +86,8 @@ ARG PROFILE=release
 RUN --mount=type=bind,from=mirakc-archive,source=/archive.tar.gz,target=/archive.tar.gz \
     --mount=type=bind,source=./docker/build-scripts,target=/build-scripts/ \
     sh /build-scripts/alpine.sh mirakc $PROFILE
+# mirakc-arib-tlv is included in /archive.tar.gz because it lives in
+# /usr/local/bin of the mirakc-debian image.
 ENV MIRAKC_CONFIG=/etc/mirakc/config.yml
 ENV MIRAKC_BUILD_PROFILE=$PROFILE
 EXPOSE 40772
