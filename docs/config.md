@@ -342,6 +342,7 @@ index = "index.html"
 ```
 
 This property can be used for providing some kind of Web UI for mirakc.
+See [docs/web-ui.md](./web-ui.md) about how to serve the bundled Web UI.
 
 ## server.folder-view-template-path
 

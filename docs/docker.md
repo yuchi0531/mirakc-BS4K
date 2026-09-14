@@ -42,6 +42,10 @@ Each image contains the following executables other than mirakc:
 * [socat]
 * [DVBv5 Tools]
 
+The images built from this repository also contain the bundled [miraview] Web UI
+at `/usr/share/miraview`.  See [docs/web-ui.md](./web-ui.md) about how to serve
+it via `server.mounts`.
+
 ## Build a custom image
 
 ### Install additional software
@@ -127,4 +131,5 @@ See the following page for details about `BUILDPLATFORM` and `TARGETPLATFORM`:
 [jq]: https://stedolan.github.io/jq/
 [socat]: http://www.dest-unreach.org/socat/doc/socat.html
 [DVBv5 Tools]:https://linuxtv.org/wiki/index.php/DVBv5_Tools
+[miraview]: https://github.com/maeda577/miraview
 [Docker Hub]: https://hub.docker.com/r/mirakc/mirakc

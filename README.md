@@ -113,6 +113,9 @@ $ curl -fsSL http://localhost:40772/api/version
 
 See [docs/config.md](./docs/config.md) for details of `config.yml`.
 
+The Docker images built from this repository bundle [miraview], a web frontend
+for mirakc.  See [docs/web-ui.md](./docs/web-ui.md) about how to enable it.
+
 ## Motivation
 
 In these days, you can build a TV recording system by yourself, using a SBC
@@ -191,6 +194,12 @@ implementations:
 
 * [Mirakurun]
 
+The following software is bundled with mirakc:
+
+* [miraview] (MIT License, Copyright (c) 2022 maeda577)
+  * A web frontend for mirakc, served via `server.mounts`
+  * See [docs/web-ui.md](./docs/web-ui.md)
+
 ## License
 
 Licensed under either of
@@ -212,5 +221,6 @@ shall be dual licensed as above, without any additional terms or conditions.
 [mirakc/performance-measurements]: https://github.com/mirakc/performance-measurements
 [BonDriver_Mirakurun]: https://github.com/Chinachu/BonDriver_Mirakurun
 [BonDriver_mirakc]: https://github.com/epgdatacapbon/BonDriver_mirakc
+[miraview]: https://github.com/maeda577/miraview
 [LICENSE-APACHE]: ./LICENSE-APACHE
 [LICENSE-MIT]: ./LICENSE-MIT
