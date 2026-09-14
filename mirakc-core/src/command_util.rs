@@ -11,6 +11,7 @@ use std::task::Context;
 use std::task::Poll;
 use std::thread::sleep;
 use std::time::Duration;
+use std::time::Instant;
 
 use tokio::fs::File;
 use tokio::io::AsyncRead;
@@ -43,6 +44,25 @@ static COMMAND_PIPELINE_TERMINATION_WAIT_NANOS: LazyLock<Duration> = LazyLock::n
         .unwrap_or(COMMAND_PIPELINE_TERMINATION_WAIT_NANOS_DEFAULT);
     tracing::debug!(
         COMMAND_PIPELINE_TERMINATION_WAIT_NANOS = %humantime::format_duration(nanos),
+    );
+    nanos
+});
+
+const COMMAND_PIPELINE_SIGTERM_GRACE_NANOS_DEFAULT: Duration = Duration::from_secs(2);
+
+static COMMAND_PIPELINE_SIGTERM_GRACE_NANOS: LazyLock<Duration> = LazyLock::new(|| {
+    let nanos = env::var("MIRAKC_COMMAND_PIPELINE_SIGTERM_GRACE_NANOS")
+        .ok()
+        .map(|s| {
+            s.parse::<u64>().expect(
+                "MIRAKC_COMMAND_PIPELINE_SIGTERM_GRACE_NANOS \
+                      must be a u64 value",
+            )
+        })
+        .map(Duration::from_nanos)
+        .unwrap_or(COMMAND_PIPELINE_SIGTERM_GRACE_NANOS_DEFAULT);
+    tracing::debug!(
+        COMMAND_PIPELINE_SIGTERM_GRACE_NANOS = %humantime::format_duration(nanos),
     );
     nanos
 });
@@ -254,18 +274,50 @@ where
         for mut data in std::mem::take(&mut self.commands).into_iter() {
             match data.process.id() {
                 Some(_) => {
-                    // Always send a SIGKILL to the process.
-                    tracing::debug!(pid = data.pid, "Kill");
-                    let _ = data.process.start_kill();
+                    // Send a SIGTERM first so that the process can clean up its
+                    // descendants before we resort to a SIGKILL.  For example,
+                    // a tuner command traps SIGTERM and terminates its
+                    // grandchildren (e.g. a streaming process) in order to
+                    // release resources like a tuner device.
+                    let pid = data.pid as libc::pid_t;
+                    tracing::debug!(pid = data.pid, "Send SIGTERM");
+                    // Safety: sending a signal to an existing process is safe.
+                    unsafe {
+                        let _ = libc::kill(pid, libc::SIGTERM);
+                    }
 
-                    // It's necessary to wait for the process termination because
-                    // the process may  exclusively use resources like a tuner
-                    // device.
+                    // Wait for the process termination for a grace period.
+                    // The process surviving the grace period will be killed
+                    // with a SIGKILL below.
                     //
-                    // However, we cannot wait for any async task here, so we wait
-                    // for the process termination in a busy loop.
-                    while let Ok(None) = data.process.try_wait() {
-                        sleep(*COMMAND_PIPELINE_TERMINATION_WAIT_NANOS);
+                    // However, we cannot wait for any async task here, so we
+                    // wait for the process termination in a busy loop.
+                    let deadline = Instant::now() + *COMMAND_PIPELINE_SIGTERM_GRACE_NANOS;
+                    let mut terminated = false;
+                    while Instant::now() < deadline {
+                        match data.process.try_wait() {
+                            Ok(Some(_)) => {
+                                terminated = true;
+                                break;
+                            }
+                            _ => sleep(*COMMAND_PIPELINE_TERMINATION_WAIT_NANOS),
+                        }
+                    }
+
+                    if !terminated {
+                        // Always send a SIGKILL to the process.
+                        tracing::debug!(pid = data.pid, "Kill");
+                        let _ = data.process.start_kill();
+
+                        // It's necessary to wait for the process termination because
+                        // the process may  exclusively use resources like a tuner
+                        // device.
+                        //
+                        // However, we cannot wait for any async task here, so we wait
+                        // for the process termination in a busy loop.
+                        while let Ok(None) = data.process.try_wait() {
+                            sleep(*COMMAND_PIPELINE_TERMINATION_WAIT_NANOS);
+                        }
                     }
                 }
                 None => tracing::debug!(pid = data.pid, "Already terminated"),
