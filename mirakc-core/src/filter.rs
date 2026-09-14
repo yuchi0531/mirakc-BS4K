@@ -4,6 +4,38 @@ use crate::config::FilterConfig;
 use crate::config::PostFilterConfig;
 use crate::config::PreFilterConfig;
 use crate::error::Error;
+use crate::models::ChannelType;
+
+/// Returns true for channels whose tuner output must be passed through
+/// without TS-oriented builtin filters.
+///
+/// BS4K tuners deliver decoded TLV (sync 0x7F, 1 TLV = 1 service, MMirakurun
+/// compatible) straight from a remote server.  `mirakc-arib`
+/// service/program/decode filters are TS-only and must not touch the stream.
+/// Pre/post filters explicitly listed by the user are still applied.
+pub fn is_tlv_passthrough(channel_type: ChannelType) -> bool {
+    matches!(channel_type, ChannelType::BS4K)
+}
+
+/// Error message for BS4K program-level operations that require a PCR clock.
+///
+/// BS4K clock synchronization is disabled (see `epg::clock_synchronizer`):
+/// TLV has no PCR clock concept.  Program-level streaming and recording need
+/// `QueryClock`, which always fails with `ClockNotSynced` for BS4K.  Use
+/// channel/service passthrough streams instead.
+pub const BS4K_PROGRAM_LEVEL_UNSUPPORTED: &str = "BS4K program-level stream is unsupported (clock sync disabled for BS4K): \
+     use channel/service passthrough streams only";
+
+/// Returns an error for BS4K program-level operations, `Ok` otherwise.
+///
+/// Call this before `QueryClock` so that BS4K callers get a clear message
+/// instead of a bare `ClockNotSynced` failure.
+pub fn ensure_program_level_supported(channel_type: ChannelType) -> Result<(), Error> {
+    if is_tlv_passthrough(channel_type) {
+        return Err(Error::InvalidRequest(BS4K_PROGRAM_LEVEL_UNSUPPORTED));
+    }
+    Ok(())
+}
 
 pub struct FilterPipelineBuilder {
     data: mustache::Data,
@@ -17,6 +49,10 @@ impl FilterPipelineBuilder {
         FilterPipelineBuilder {
             data,
             filters: Vec::new(),
+            // BS4K TLV passthrough also keeps `video/MP2T` for now.  The
+            // remote decoded-TLV server answers with `video/MP2T` and
+            // Mirakurun/EPGStation clients expect it, so switching to a
+            // TLV-specific content type would break compatibility.
             content_type: "video/MP2T".to_string(),
             seekable,
         }
@@ -149,6 +185,29 @@ mod tests {
     use super::*;
     use assert_matches::assert_matches;
     use test_log::test;
+
+    #[test]
+    fn test_is_tlv_passthrough() {
+        assert!(is_tlv_passthrough(ChannelType::BS4K));
+        assert!(!is_tlv_passthrough(ChannelType::GR));
+        assert!(!is_tlv_passthrough(ChannelType::BS));
+        assert!(!is_tlv_passthrough(ChannelType::CS));
+        assert!(!is_tlv_passthrough(ChannelType::SKY));
+    }
+
+    #[test]
+    fn test_ensure_program_level_supported() {
+        assert_matches!(
+            ensure_program_level_supported(ChannelType::BS4K),
+            Err(Error::InvalidRequest(msg)) => {
+                assert!(msg.contains("BS4K"));
+            }
+        );
+        assert!(ensure_program_level_supported(ChannelType::GR).is_ok());
+        assert!(ensure_program_level_supported(ChannelType::BS).is_ok());
+        assert!(ensure_program_level_supported(ChannelType::CS).is_ok());
+        assert!(ensure_program_level_supported(ChannelType::SKY).is_ok());
+    }
 
     #[test]
     fn test_make_filter() {

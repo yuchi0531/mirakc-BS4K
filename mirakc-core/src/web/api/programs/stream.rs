@@ -2,6 +2,8 @@ use super::*;
 
 use crate::epg::EpgProgram;
 use crate::epg::EpgService;
+use crate::filter::ensure_program_level_supported;
+use crate::filter::is_tlv_passthrough;
 use crate::models::Clock;
 use crate::web::api::stream::StreamingHeaderParams;
 use crate::web::api::stream::do_head_stream;
@@ -69,6 +71,11 @@ where
     let service_id = program_id.into();
     let program = epg.call(epg::QueryProgram { program_id }).await??;
     let service = epg.call(epg::QueryService { service_id }).await??;
+    // BS4K program-level streaming with a PCR clock is unsupported: clock
+    // synchronization is disabled for BS4K (TLV has no PCR clock concept), so
+    // `QueryClock` below would always fail with `ClockNotSynced`.  Fail here
+    // with a clear message instead.  Channel/service passthrough only.
+    ensure_program_level_supported(service.channel.channel_type)?;
     let clock = epg.call(epg::QueryClock { service_id }).await??;
 
     let stream = tuner_manager
@@ -161,6 +168,9 @@ where
     let service_id = program_id.into();
     let program = epg.call(epg::QueryProgram { program_id }).await??;
     let service = epg.call(epg::QueryService { service_id }).await??;
+    // Same explicit BS4K guard as the GET handler: program-level streaming
+    // is unsupported, channel/service passthrough only.
+    ensure_program_level_supported(service.channel.channel_type)?;
     let clock = epg.call(epg::QueryClock { service_id }).await??;
 
     let (_, content_type, seekable) = build_filters(
@@ -235,10 +245,115 @@ fn build_filters(
 
     let mut builder = FilterPipelineBuilder::new(data, false); // not seekable
     builder.add_pre_filters(&config.pre_filters, &filter_setting.pre_filters)?;
-    if !decoded && filter_setting.decode {
-        builder.add_decode_filter(&config.filters.decode_filter)?;
+    // BS4K delivers decoded TLV passthrough from the tuner.  mirakc-arib
+    // program/decode filters are TS-only and must not touch the stream, so
+    // skip both even when `decode=true`.  Content-Type stays `video/MP2T`
+    // for Mirakurun-client compatibility.
+    if !is_tlv_passthrough(service.channel.channel_type) {
+        if !decoded && filter_setting.decode {
+            builder.add_decode_filter(&config.filters.decode_filter)?;
+        }
+        builder.add_program_filter(&config.filters.program_filter)?;
     }
-    builder.add_program_filter(&config.filters.program_filter)?;
     builder.add_post_filters(&config.post_filters, &filter_setting.post_filters)?;
     Ok(builder.build())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::epg::EpgChannel;
+    use assert_matches::assert_matches;
+
+    #[test]
+    fn test_bs4k_program_stream_is_explicitly_unsupported() {
+        // The GET/HEAD handlers call this before `QueryClock` so that BS4K
+        // callers get a clear message instead of a bare `ClockNotSynced`.
+        assert_matches!(
+            ensure_program_level_supported(ChannelType::BS4K),
+            Err(Error::InvalidRequest(msg)) => {
+                assert!(msg.contains("BS4K"));
+            }
+        );
+        assert!(ensure_program_level_supported(ChannelType::GR).is_ok());
+    }
+
+    #[test]
+    fn test_build_filters_bs4k_passthrough() {
+        let mut config = Config::default();
+        config.filters.decode_filter.command = "echo decode".to_string();
+        config.filters.program_filter.command = "echo program".to_string();
+        let user = TunerUser {
+            info: TunerUserInfo::Web {
+                id: "test".to_string(),
+                agent: None,
+            },
+            priority: 0.into(),
+        };
+        let filter_setting = FilterSetting {
+            decode: true,
+            pre_filters: vec![],
+            post_filters: vec![],
+        };
+        let clock = Clock {
+            pid: 0,
+            pcr: 0,
+            time: 0,
+        };
+        let program = EpgProgram::new((0, 1, 1).into());
+
+        // GR keeps the TS-only decode/program filters.
+        let service = EpgService {
+            id: (0, 1).into(),
+            service_type: 1,
+            logo_id: 0,
+            remote_control_key_id: 0,
+            name: "gr".to_string(),
+            channel: EpgChannel {
+                name: "gr".to_string(),
+                channel_type: ChannelType::GR,
+                channel: "0".to_string(),
+                extra_args: "".to_string(),
+                services: vec![],
+                excluded_services: vec![],
+            },
+        };
+        let (filters, _, _) = build_filters(
+            &config,
+            &user,
+            &filter_setting,
+            &clock,
+            &service,
+            &program,
+            false,
+        )
+        .unwrap();
+        assert_eq!(filters.len(), 2);
+
+        // BS4K skips both, same as channel/service passthrough streams.
+        let service = EpgService {
+            channel: EpgChannel {
+                name: "bs4k".to_string(),
+                channel_type: ChannelType::BS4K,
+                channel: "45168".to_string(),
+                extra_args: "".to_string(),
+                services: vec![],
+                excluded_services: vec![],
+            },
+            ..service
+        };
+        let (filters, content_type, _) = build_filters(
+            &config,
+            &user,
+            &filter_setting,
+            &clock,
+            &service,
+            &program,
+            false,
+        )
+        .unwrap();
+        assert!(filters.is_empty());
+        assert_eq!(content_type, "video/MP2T");
+    }
 }

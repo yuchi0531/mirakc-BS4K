@@ -343,6 +343,19 @@ where
     ) -> <SpawnTemporalTracker as Message>::Reply {
         tracing::debug!(msg.name = "SpawnTempralLocalTracker", %msg.service.id);
 
+        // BS4K on-air tracking is explicitly disabled (see
+        // `super::local::should_skip_onair_tracking` for the reason).
+        // Don't spawn a TS-only `collect-eitpf` temporal tracker for a TLV
+        // service.
+        if super::local::should_skip_onair_tracking(msg.service.channel.channel_type) {
+            tracing::warn!(
+                service.id = %msg.service.id,
+                channel.type = ?msg.service.channel.channel_type,
+                "Skipping temporal on-air tracker for BS4K (unsupported)",
+            );
+            return;
+        }
+
         let service_id = msg.service.id;
         for config in self.config.onair_program_trackers.values() {
             if config.matches(&msg.service) {

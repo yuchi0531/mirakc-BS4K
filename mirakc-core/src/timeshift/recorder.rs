@@ -334,6 +334,20 @@ where
         let config = &self.config.timeshift.recorders[&self.name];
         let channel = &self.service.channel;
 
+        // BS4K timeshift recording is explicitly disabled (see
+        // `ensure_timeshift_supported`).  Fail before grabbing a tuner so
+        // that the failure is clear instead of a PAT-seek/decode failure
+        // deep in the pipeline.
+        if let Err(err) = ensure_timeshift_supported(channel.channel_type) {
+            tracing::error!(
+                recorder.name = self.name,
+                channel.type = ?channel.channel_type,
+                %err,
+                "BS4K timeshift recording is unsupported",
+            );
+            return Err(err);
+        }
+
         let user = TunerUser {
             info: TunerUserInfo::TimeshiftRecorder(self.name.clone()),
             priority: config.priority.into(),
@@ -404,6 +418,27 @@ where
     }
 }
 
+/// Returns an error for channel types excluded from timeshift recording.
+///
+/// Decision (H6): BS4K timeshift is explicitly disabled rather than given
+/// passthrough-consistent handling.  Reason: the timeshift pipeline assumes
+/// MPEG-TS — it decodes before recording so that seeking works, and only
+/// streams starting with PAT packets can be decoded (see the NOTE in
+/// `do_start_recording`).  A BS4K TLV stream has no PAT, and the timeshift
+/// `record-service` command is TS-only.  Making timeshift work for BS4K
+/// would need a TLV-aware record/seek path, which is out of scope
+/// (channel/service passthrough only, same policy as program-level
+/// streaming/recording).
+pub(crate) fn ensure_timeshift_supported(channel_type: ChannelType) -> Result<(), Error> {
+    if is_tlv_passthrough(channel_type) {
+        return Err(Error::InvalidRequest(
+            "BS4K timeshift recording is unsupported (TLV has no PAT for seeking): \
+             timeshift requires MPEG-TS",
+        ));
+    }
+    Ok(())
+}
+
 // actor
 
 #[async_trait]
@@ -447,6 +482,21 @@ where
 {
     async fn handle(&mut self, msg: ServiceUpdated, ctx: &mut Context<Self>) {
         if let Some(service) = msg.service {
+            // BS4K timeshift recording is explicitly disabled (see
+            // `ensure_timeshift_supported`).  Keep the service for the model
+            // but don't mark it available so that neither this handler nor
+            // `HealthCheck` attempts to record a TLV stream with the
+            // TS-only (PAT-seeking) timeshift pipeline.
+            if ensure_timeshift_supported(service.channel.channel_type).is_err() {
+                self.service = service;
+                self.service_available = false;
+                tracing::warn!(
+                    recorder.name = self.name,
+                    "BS4K timeshift recording is unsupported, \
+                     timeshift recorder stays idle",
+                );
+                return;
+            }
             self.service = service;
             self.service_available = true;
             tracing::info!(recorder.name = self.name, "Service is now available");
@@ -1080,6 +1130,63 @@ mod tests {
         recorder.purge_expired_records();
         assert_eq!(recorder.records.len(), 1);
         assert_eq!(recorder.records[0].program.id, (0, 1, 3).into());
+    }
+
+    #[test]
+    fn test_bs4k_timeshift_disabled() {
+        // H6 decision: BS4K timeshift is explicitly disabled (TLV has no PAT
+        // for seeking, timeshift pipeline is TS-only).
+        assert_matches!(
+            ensure_timeshift_supported(ChannelType::BS4K),
+            Err(Error::InvalidRequest(msg)) => {
+                assert!(msg.contains("BS4K"));
+            }
+        );
+        assert!(ensure_timeshift_supported(ChannelType::GR).is_ok());
+        assert!(ensure_timeshift_supported(ChannelType::BS).is_ok());
+        assert!(ensure_timeshift_supported(ChannelType::CS).is_ok());
+        assert!(ensure_timeshift_supported(ChannelType::SKY).is_ok());
+    }
+
+    #[test(tokio::test)]
+    async fn test_bs4k_timeshift_service_updated_stays_idle() {
+        let system = System::new();
+
+        let temp_dir = TempDir::new().unwrap();
+        let config = create_config(temp_dir.path());
+
+        // The tuner stub would succeed, proving that the idle state comes
+        // from the explicit BS4K guard and not from a tuner failure.
+        let notify = Arc::new(Notify::new());
+        let tuner_manager = BrokenTunerManagerStub(notify.clone());
+
+        let (observer, _started, _stopped) = Observer::new();
+
+        let recorder = system
+            .spawn_actor(recorder!(config, tuner_manager, observer))
+            .await;
+
+        recorder
+            .emit(ServiceUpdated {
+                service: Some(service!(
+                    1,
+                    "BS4K",
+                    channel!("bs4k", ChannelType::BS4K, "45168")
+                )),
+            })
+            .await;
+        // The subsequent call is handled after the emitted message, so the
+        // model reflects the post guard state without sleeping.
+        let msg = QueryTimeshiftRecorder {
+            recorder: TimeshiftRecorderQuery::ByIndex(0), // dummy
+        };
+        let result = recorder.call(msg).await;
+        assert_matches!(result, Ok(Ok(model)) => {
+            assert!(!model.recording);
+            assert_eq!(model.service.channel.channel_type, ChannelType::BS4K);
+        });
+
+        system.shutdown().await;
     }
 
     #[test(tokio::test)]

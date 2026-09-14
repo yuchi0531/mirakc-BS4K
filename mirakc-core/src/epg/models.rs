@@ -26,7 +26,13 @@ pub struct EitSection {
 
 impl EitSection {
     pub fn is_valid(&self) -> bool {
-        matches!(self.table_id, 0x50 | 0x51 | 0x58 | 0x59)
+        // EIT[schedule] covers 0x50-0x57 (basic) and 0x58-0x5F (extended).
+        // BS4K MH-EIT sections are normalized by mirakc-arib into this same
+        // range (MH 0x8B -> 0x50, basic 0x8C-0x93 -> 0x50-0x57,
+        // extended 0x94-0x9B -> 0x58-0x5F), so the full range must be
+        // accepted here.  Restricting to 0x50/0x51/0x58/0x59 drops most of
+        // the schedule.
+        matches!(self.table_id, 0x50..=0x5F)
     }
 
     pub fn is_basic(&self) -> bool {
@@ -55,6 +61,57 @@ impl EitSection {
 
     pub fn service_id(&self) -> ServiceId {
         ServiceId::new(self.original_network_id, self.service_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn section_with_table_id(table_id: u16) -> EitSection {
+        EitSection {
+            original_network_id: 0.into(),
+            transport_stream_id: 0.into(),
+            service_id: 0.into(),
+            table_id,
+            section_number: 0,
+            last_section_number: 0,
+            segment_last_section_number: 0,
+            version_number: 0,
+            events: vec![],
+        }
+    }
+
+    #[test]
+    fn test_eit_section_is_valid_full_schedule_range() {
+        // Previously only 0x50/0x51/0x58/0x59 were accepted, dropping most
+        // of the schedule.  The full EIT[schedule] range must be valid,
+        // including the MH-normalized BS4K tables.
+        for table_id in 0x50..=0x5F {
+            assert!(
+                section_with_table_id(table_id).is_valid(),
+                "table_id {table_id:#X} must be valid"
+            );
+        }
+        assert!(!section_with_table_id(0x4E).is_valid());
+        assert!(!section_with_table_id(0x4F).is_valid());
+        assert!(!section_with_table_id(0x00).is_valid());
+        assert!(!section_with_table_id(0x60).is_valid());
+    }
+
+    #[test]
+    fn test_eit_section_basic_extended_split() {
+        for table_id in 0x50..=0x57 {
+            let section = section_with_table_id(table_id);
+            assert!(section.is_basic(), "table_id {table_id:#X} must be basic");
+        }
+        for table_id in 0x58..=0x5F {
+            let section = section_with_table_id(table_id);
+            assert!(
+                !section.is_basic(),
+                "table_id {table_id:#X} must be extended"
+            );
+        }
     }
 }
 

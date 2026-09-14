@@ -569,6 +569,32 @@ impl ChannelConfig {
             !self.channel.is_empty(),
             "config.channels[{index}].channel: must be a non-empty string"
         );
+        if self.channel_type == ChannelType::BS4K {
+            // BS4K channels carry an opaque StreamID as-is to the tuner
+            // command (e.g. `{{{channel}}}`).  No frequency/polarization/TSID
+            // conversion is done in mirakc.  Accept a decimal integer or a
+            // `0x`/`0X`-prefixed hexadecimal integer.  No range check is
+            // performed here; out-of-range values simply fail at tuning time.
+            validate!(
+                Self::is_valid_bs4k_channel(&self.channel),
+                "config.channels[{index}].channel: must be a decimal or \
+                 0x-prefixed hexadecimal StreamID for BS4K"
+            );
+        }
+    }
+
+    fn is_valid_bs4k_channel(channel: &str) -> bool {
+        if channel.is_empty() {
+            return false;
+        }
+        if let Some(hex) = channel
+            .strip_prefix("0x")
+            .or_else(|| channel.strip_prefix("0X"))
+        {
+            !hex.is_empty() && hex.bytes().all(|b| b.is_ascii_hexdigit())
+        } else {
+            channel.bytes().all(|b| b.is_ascii_digit())
+        }
     }
 }
 
@@ -853,6 +879,125 @@ impl JobsConfig {
 // `$default_command` and `$default_schedule`.  Because `value` in `#[serde(default = value)]` must
 // be a string literal.
 macro_rules! define_job_config {
+    // Variant with a BS4K-specific command (scan-services, update-schedules).
+    (
+        $name:ident,
+        $label:literal,
+        $default_command:literal => $default_command_value:literal,
+        $default_schedule:literal => $default_schedule_value:literal,
+        $default_timeout:literal => $default_timeout_value:expr,
+        $default_command_bs4k:literal => $default_command_bs4k_value:literal,
+    ) => {
+        #[derive(Clone, Debug, Deserialize, PartialEq)]
+        #[serde(rename_all = "kebab-case")]
+        #[serde(deny_unknown_fields)]
+        pub struct $name {
+            #[serde(default = $default_command)]
+            pub command: String,
+            #[serde(default = $default_command_bs4k)]
+            pub command_bs4k: String,
+            #[serde(default = $default_schedule)]
+            pub schedule: String,
+            #[serde(default = $default_timeout, with = "humantime_serde")]
+            pub timeout: Duration,
+            #[serde(default)]
+            pub disabled: bool,
+        }
+
+        impl $name {
+            fn default_command() -> String {
+                $default_command_value.to_string()
+            }
+
+            fn default_command_for_bs4k() -> String {
+                $default_command_bs4k_value.to_string()
+            }
+
+            pub fn command_for(&self, channel_type: ChannelType) -> &str {
+                if channel_type == ChannelType::BS4K {
+                    &self.command_bs4k
+                } else {
+                    &self.command
+                }
+            }
+
+            fn default_schedule() -> String {
+                $default_schedule_value.to_string()
+            }
+
+            fn default_timeout() -> Duration {
+                $default_timeout_value
+            }
+
+            fn normalize(&mut self) {
+                if !self.disabled {
+                    if self.command.is_empty() {
+                        self.command = Self::default_command();
+                    }
+                    if self.command_bs4k.is_empty() {
+                        self.command_bs4k = Self::default_command_for_bs4k();
+                    }
+                    if self.schedule.is_empty() {
+                        self.schedule = Self::default_schedule();
+                    }
+                }
+            }
+
+            fn validate(&self) {
+                if self.disabled {
+                    if !crate::timeshift::is_rebuild_mode() {
+                        tracing::warn!(config = concat!("config.jobs.", $label), "Disabled");
+                    }
+                } else {
+                    validate!(
+                        !self.command.is_empty(),
+                        concat!(
+                            "config.jobs.",
+                            $label,
+                            ".command: must be a non-empty string"
+                        ),
+                    );
+                    validate!(
+                        is_valid_command(&self.command),
+                        concat!("config.jobs.", $label, ".command: must be a valid command"),
+                    );
+                    validate!(
+                        !self.command_bs4k.is_empty(),
+                        concat!(
+                            "config.jobs.",
+                            $label,
+                            ".command-bs4k: must be a non-empty string"
+                        ),
+                    );
+                    validate!(
+                        is_valid_command(&self.command_bs4k),
+                        concat!(
+                            "config.jobs.",
+                            $label,
+                            ".command-bs4k: must be a valid command"
+                        ),
+                    );
+                    validate!(
+                        cron::Schedule::from_str(&self.schedule).is_ok(),
+                        concat!("config.jobs.", $label, ".schedule: not valid"),
+                    );
+                }
+            }
+        }
+
+        impl Default for $name {
+            fn default() -> Self {
+                Self {
+                    command: Self::default_command(),
+                    command_bs4k: Self::default_command_for_bs4k(),
+                    schedule: Self::default_schedule(),
+                    timeout: Self::default_timeout(),
+                    disabled: false,
+                }
+            }
+        }
+    };
+    // Variant without a BS4K-specific command (sync-clocks and others).
     (
         $name:ident,
         $label:literal,
@@ -949,6 +1094,10 @@ define_job_config! {
         "0 1 8,20 * * * *",
     "ScanServicesJobConfig::default_timeout" =>
         Duration::from_secs(30),
+    "ScanServicesJobConfig::default_command_for_bs4k" =>
+        "mirakc-arib scan-services-tlv\
+         {{#sids}} --sids={{{.}}}{{/sids}}\
+         {{#xsids}} --xsids={{{.}}}{{/xsids}}",
 }
 
 define_job_config! {
@@ -978,6 +1127,10 @@ define_job_config! {
     // TODO(refactor): use Duration::from_mins(1) once it's stabilized.
     "UpdateSchedulesJobConfig::default_timeout" =>
         Duration::from_secs(600), // 10m
+    "UpdateSchedulesJobConfig::default_command_for_bs4k" =>
+        "mirakc-arib collect-mh-eits\
+         {{#sids}} --sids={{{.}}}{{/sids}}\
+         {{#xsids}} --xsids={{{.}}}{{/xsids}}",
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
@@ -2449,6 +2602,60 @@ mod tests {
     }
 
     #[test]
+    fn test_channel_config_validate_bs4k() {
+        // Decimal StreamIDs pass through with no range check.
+        for channel in ["45168", "45328", "0", "65535", "999999"] {
+            let mut config = channel_config();
+            config.channel_type = ChannelType::BS4K;
+            config.channel = channel.to_string();
+            config.validate(0);
+        }
+        // `0x`/`0X`-prefixed hex StreamIDs pass through as well.
+        for channel in ["0x0", "0xB078", "0XB078", "0xFF"] {
+            let mut config = channel_config();
+            config.channel_type = ChannelType::BS4K;
+            config.channel = channel.to_string();
+            config.validate(0);
+        }
+        // Non-BS4K channels keep the legacy behavior: any non-empty string.
+        let mut config = channel_config();
+        config.channel_type = ChannelType::GR;
+        config.channel = "not-a-stream-id".to_string();
+        config.validate(0);
+    }
+
+    #[test]
+    #[should_panic(expected = "config.channels[0].channel: must be a non-empty string")]
+    fn test_channel_config_validate_bs4k_empty() {
+        let mut config = channel_config();
+        config.channel_type = ChannelType::BS4K;
+        config.channel = "".to_string();
+        config.validate(0);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "config.channels[0].channel: must be a decimal or 0x-prefixed hexadecimal StreamID for BS4K"
+    )]
+    fn test_channel_config_validate_bs4k_invalid() {
+        let mut config = channel_config();
+        config.channel_type = ChannelType::BS4K;
+        config.channel = "BS8K".to_string();
+        config.validate(0);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "config.channels[0].channel: must be a decimal or 0x-prefixed hexadecimal StreamID for BS4K"
+    )]
+    fn test_channel_config_validate_bs4k_bare_hex() {
+        let mut config = channel_config();
+        config.channel_type = ChannelType::BS4K;
+        config.channel = "B078".to_string();
+        config.validate(0);
+    }
+
+    #[test]
     fn test_tuner_config() {
         assert!(serde_norway::from_str::<TunerConfig>("{}").is_err());
 
@@ -3076,6 +3283,7 @@ mod tests {
                         schedule: "0 30 9,12,15 1,15 May-Aug Mon,Wed,Fri 2018/2".to_string(),
                         timeout: Duration::from_secs(10),
                         disabled: false,
+                        ..Default::default()
                     }
                 }
 
@@ -3121,9 +3329,201 @@ mod tests {
         };
     }
 
-    define_test_job_config! {ScanServicesJobConfig, scan_services}
+    macro_rules! define_test_job_config_with_bs4k {
+        ($name:ident, $label:ident) => {
+            paste::paste! {
+                #[test]
+                fn [<test_ $label _job_config>]() {
+                    assert_eq!(
+                        serde_norway::from_str::<$name>("{}").unwrap(),
+                        $name::default()
+                    );
+
+                    let mut config = $name::default();
+                    config.command = "true".to_string();
+                    assert_eq!(
+                        serde_norway::from_str::<$name>("command: 'true'").unwrap(),
+                        config
+                    );
+
+                    let mut config = $name::default();
+                    config.command_bs4k = "true".to_string();
+                    assert_eq!(
+                        serde_norway::from_str::<$name>("command-bs4k: 'true'").unwrap(),
+                        config
+                    );
+
+                    let mut config = $name::default();
+                    config.schedule = "*".to_string();
+                    assert_eq!(
+                        serde_norway::from_str::<$name>("schedule: '*'").unwrap(),
+                        config
+                    );
+
+                    let mut config = $name::default();
+                    config.timeout = Duration::from_secs(45);
+                    assert_eq!(
+                        serde_norway::from_str::<$name>("timeout: 45s").unwrap(),
+                        config
+                    );
+
+                    let mut config = $name::default();
+                    config.disabled = true;
+                    assert_eq!(
+                        serde_norway::from_str::<$name>("disabled: true").unwrap(),
+                        config
+                    );
+
+                    assert!(
+                        serde_norway::from_str::<$name>(
+                            "unknown:\n  property: value"
+                        ).is_err()
+                    );
+                }
+
+                fn [<$label _job_config>]() -> $name {
+                    $name {
+                        command: "true".to_string(),
+                        command_bs4k: "true".to_string(),
+                        schedule: "0 30 9,12,15 1,15 May-Aug Mon,Wed,Fri 2018/2".to_string(),
+                        timeout: Duration::from_secs(10),
+                        disabled: false,
+                    }
+                }
+
+                #[test]
+                fn [<test_ $label _job_config_validate>]() {
+                    let config = [<$label _job_config>]();
+                    config.validate();
+                }
+
+                #[test]
+                #[should_panic(expected = "command: must be a non-empty string")]
+                fn [<test_ $label _job_config_validate_empty_command>]() {
+                    let mut config = [<$label _job_config>]();
+                    config.command = "".to_string();
+                    config.validate();
+                }
+
+                #[test]
+                #[should_panic(expected = "command: must be a valid command")]
+                fn [<test_ $label _job_config_validate_command>]() {
+                    let mut config = [<$label _job_config>]();
+                    config.command = "no-such-command".to_string();
+                    config.validate();
+                }
+
+                #[test]
+                #[should_panic(expected = "command-bs4k: must be a non-empty string")]
+                fn [<test_ $label _job_config_validate_empty_command_bs4k>]() {
+                    let mut config = [<$label _job_config>]();
+                    config.command_bs4k = "".to_string();
+                    config.validate();
+                }
+
+                #[test]
+                #[should_panic(expected = "command-bs4k: must be a valid command")]
+                fn [<test_ $label _job_config_validate_command_bs4k>]() {
+                    let mut config = [<$label _job_config>]();
+                    config.command_bs4k = "no-such-command".to_string();
+                    config.validate();
+                }
+
+                #[test]
+                #[should_panic(expected = "schedule: not valid")]
+                fn [<test_ $label _job_config_validate_schedule>]() {
+                    let mut config = [<$label _job_config>]();
+                    config.schedule = "".to_string();
+                    config.validate();
+                }
+
+                #[test]
+                fn [<test_ $label _job_config_validate_disabled>]() {
+                    let mut config = [<$label _job_config>]();
+                    config.command = "".to_string();
+                    config.command_bs4k = "".to_string();
+                    config.schedule = "".to_string();
+                    config.disabled = true;
+                    config.validate();
+                }
+            }
+        };
+    }
+
+    define_test_job_config_with_bs4k! {ScanServicesJobConfig, scan_services}
     define_test_job_config! {SyncClocksJobConfig, sync_clocks}
-    define_test_job_config! {UpdateSchedulesJobConfig, update_schedules}
+    define_test_job_config_with_bs4k! {UpdateSchedulesJobConfig, update_schedules}
+
+    #[test]
+    fn test_scan_services_job_config_bs4k_command() {
+        // Existing 2K default must not change.
+        assert_eq!(
+            ScanServicesJobConfig::default().command,
+            "mirakc-arib scan-services\
+             {{#sids}} --sids={{{.}}}{{/sids}}\
+             {{#xsids}} --xsids={{{.}}}{{/xsids}}"
+        );
+        // BS4K default uses the TLV variant with --sids/--xsids support.
+        let bs4k = ScanServicesJobConfig::default_command_for_bs4k();
+        assert!(bs4k.contains("scan-services-tlv"));
+        assert!(bs4k.contains("--sids"));
+        assert!(bs4k.contains("--xsids"));
+
+        let config = ScanServicesJobConfig::default();
+        assert_eq!(config.command_for(ChannelType::GR), config.command.as_str());
+        assert_eq!(
+            config.command_for(ChannelType::BS4K),
+            config.command_bs4k.as_str()
+        );
+
+        // User-provided command-bs4k is selectable per channel type.
+        let config = serde_norway::from_str::<ScanServicesJobConfig>(
+            "command: 'true'\ncommand-bs4k: 'false'",
+        )
+        .unwrap();
+        assert_eq!(config.command_for(ChannelType::GR), "true");
+        assert_eq!(config.command_for(ChannelType::BS4K), "false");
+
+        // Omitted command-bs4k falls back to the default template.
+        let config = serde_norway::from_str::<ScanServicesJobConfig>("command: 'true'").unwrap();
+        assert_eq!(
+            config.command_bs4k,
+            ScanServicesJobConfig::default_command_for_bs4k()
+        );
+    }
+
+    #[test]
+    fn test_update_schedules_job_config_bs4k_command() {
+        // Existing 2K default must not change.
+        assert_eq!(
+            UpdateSchedulesJobConfig::default().command,
+            "mirakc-arib collect-eits\
+             {{#sids}} --sids={{{.}}}{{/sids}}\
+             {{#xsids}} --xsids={{{.}}}{{/xsids}}"
+        );
+        // BS4K default uses the MH-EIT variant with --sids/--xsids support.
+        let bs4k = UpdateSchedulesJobConfig::default_command_for_bs4k();
+        assert!(bs4k.contains("collect-mh-eits"));
+        assert!(bs4k.contains("--sids"));
+        assert!(bs4k.contains("--xsids"));
+
+        let config = UpdateSchedulesJobConfig::default();
+        assert_eq!(config.command_for(ChannelType::GR), config.command.as_str());
+        assert_eq!(
+            config.command_for(ChannelType::BS4K),
+            config.command_bs4k.as_str()
+        );
+
+        // Empty command-bs4k is filled by normalize().
+        let mut config =
+            serde_norway::from_str::<UpdateSchedulesJobConfig>("command: 'true'").unwrap();
+        config.command_bs4k = "".to_string();
+        config.normalize();
+        assert_eq!(
+            config.command_bs4k,
+            UpdateSchedulesJobConfig::default_command_for_bs4k()
+        );
+    }
 
     #[test]
     fn test_recording_config() {

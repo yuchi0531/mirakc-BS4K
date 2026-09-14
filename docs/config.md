@@ -521,6 +521,59 @@ channel = "000"
 extra-args = "--space 1"
 ```
 
+### BS4K
+
+BS4K channels from a decoded-TLV remote server are passthrough.  No frequency
+or polarization is specified.
+
+* `channel` is an opaque StreamID string passed through to the tuner command
+  as `{{{channel}}}`.
+  * Decimal and `0x`-prefixed hex forms are accepted as-is.
+  * For example, `'45328'` and `'0xB110'` select the same stream.
+  * Always quote the value so it stays a string.
+  * A StreamID is not a serviceId.
+* Specify `services` explicitly (for example, `services: [101]`).
+* No `extra-args` is needed.
+* No `decode-filter` is needed.  Leave `filters.decode-filter.command` unset
+  when the remote server already returns decoded TLV.
+* Left-handed polarized channels and BS8K are disabled by default.  Keep them
+  defined with `disabled: true` if needed.
+
+```yaml
+# YAML
+channels:
+  # NHK BS4K.  '45328' == '0xB110' as an opaque StreamID.
+  - name: NHK-BS4K
+    type: BS4K
+    channel: '45328'
+    services: [101]
+
+  # BS8K NHK.  Disabled by default.
+  - name: BS8K-NHK
+    type: BS4K
+    channel: '45280'
+    services: [102]
+    disabled: true
+```
+
+```toml
+# TOML
+[[channels]]
+# NHK BS4K.  "45328" == "0xB110" as an opaque StreamID.
+name = "NHK-BS4K"
+type = "BS4K"
+channel = "45328"
+services = [ 101 ]
+
+# BS8K NHK.  Disabled by default.
+[[channels]]
+name = "BS8K-NHK"
+type = "BS4K"
+channel = "45280"
+services = [ 102 ]
+disabled = true
+```
+
 Definitions with the same `type` and `channel` will be merged.  For example, the
 following definitions:
 

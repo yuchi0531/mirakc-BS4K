@@ -48,6 +48,14 @@ where
         let mut results = Vec::new();
 
         for channel in self.config.channels.iter() {
+            // BS4K has no PCR clock concept, so clock synchronization is
+            // disabled for BS4K channels.  Push None so that previously
+            // synchronized clocks (if any) are reused by update_clocks().
+            if channel.channel_type == ChannelType::BS4K {
+                tracing::debug!(channel.name, "Skipping clock sync for BS4K");
+                results.push((channel.clone().into(), None));
+                continue;
+            }
             let result = match Self::sync_clocks_in_channel(
                 channel,
                 command,
@@ -253,5 +261,50 @@ mod tests {
         assert_matches!(result, Err(err) => {
             assert!(err.is::<tokio::time::error::Elapsed>());
         });
+    }
+
+    #[test(tokio::test)]
+    async fn test_sync_clocks_skips_bs4k_channels() {
+        let ctx = actlet::stubs::Context::default();
+
+        let stub = TunerManagerStub::default();
+
+        let expected = vec![SyncClock {
+            nid: 1.into(),
+            tsid: 2.into(),
+            sid: 3.into(),
+            clock: Clock {
+                pid: 1,
+                pcr: 2,
+                time: 3,
+            },
+        }];
+        // The command succeeds, so a GR channel yields clocks while a BS4K
+        // channel must still be skipped (None).
+        let config_yml = format!(
+            r#"
+            channels:
+              - name: gr
+                type: GR
+                channel: '0'
+              - name: bs4k
+                type: BS4K
+                channel: '45168'
+            jobs:
+              sync-clocks:
+                command: echo '{}'
+        "#,
+            serde_json::to_string(&expected).unwrap()
+        );
+        let config = Arc::new(serde_norway::from_str::<Config>(&config_yml).unwrap());
+        let sync = ClockSynchronizer::new(config, stub);
+        let results = sync.sync_clocks(&ctx).await;
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0.channel_type, ChannelType::GR);
+        assert_matches!(&results[0].1, Some(clocks) => {
+            assert_eq!(clocks.len(), 1);
+        });
+        assert_eq!(results[1].0.channel_type, ChannelType::BS4K);
+        assert_matches!(&results[1].1, None);
     }
 }

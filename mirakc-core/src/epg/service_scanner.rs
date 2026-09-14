@@ -44,14 +44,18 @@ where
         self,
         ctx: &C,
     ) -> Vec<(EpgChannel, Option<IndexMap<ServiceId, EpgService>>)> {
-        let command = &self.config.jobs.scan_services.command;
+        let jobs = &self.config.jobs.scan_services;
         let mut results = Vec::new();
 
         for channel in self.config.channels.iter() {
+            // BS4K delivers a TLV stream; use the TLV variant so that the
+            // command receives TLV packets.  The arib fork guarantees that
+            // scan-services-tlv emits JSON compatible with TsService.
+            let command = jobs.command_for(channel.channel_type);
             let result = match Self::scan_services_in_channel(
                 channel,
                 command,
-                self.config.jobs.scan_services.timeout,
+                jobs.timeout,
                 &self.tuner_manager,
                 ctx,
             )
@@ -273,5 +277,128 @@ mod tests {
         assert_matches!(result, Err(err) => {
             assert!(err.is::<tokio::time::error::Elapsed>());
         });
+    }
+
+    #[test(tokio::test)]
+    async fn test_scan_services_selects_command_per_channel_type() {
+        use crate::config::ScanServicesJobConfig;
+
+        let config = serde_norway::from_str::<Config>(
+            r#"
+            channels:
+              - name: gr
+                type: GR
+                channel: '0'
+              - name: bs4k
+                type: BS4K
+                channel: '45168'
+            jobs:
+              scan-services:
+                command: echo GR
+                command-bs4k: echo BS4K
+        "#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.jobs.scan_services.command_for(ChannelType::GR),
+            "echo GR"
+        );
+        assert_eq!(
+            config.jobs.scan_services.command_for(ChannelType::BS4K),
+            "echo BS4K"
+        );
+        // 2K default is unchanged, BS4K default is the TLV variant.
+        assert!(!ScanServicesJobConfig::default().command.contains("-tlv"));
+        assert!(
+            ScanServicesJobConfig::default()
+                .command_for(ChannelType::BS4K)
+                .contains("scan-services-tlv")
+        );
+    }
+
+    #[test(tokio::test)]
+    async fn test_scan_services_in_channel_bs4k() {
+        use crate::config::ScanServicesJobConfig;
+
+        let ctx = actlet::stubs::Context::default();
+
+        let stub = TunerManagerStub::default();
+
+        let expected = vec![TsService {
+            nid: 4.into(),
+            tsid: 5.into(),
+            sid: 6.into(),
+            service_type: 1,
+            logo_id: -1,
+            remote_control_key_id: 0,
+            name: "bs4k-service".to_string(),
+        }];
+        // The 2K command fails while the BS4K command succeeds, proving
+        // that the BS4K channel uses command-bs4k.
+        let config_yml = format!(
+            r#"
+            channels:
+              - name: bs4k
+                type: BS4K
+                channel: '45168'
+            jobs:
+              scan-services:
+                command: false
+                command-bs4k: echo '{}'
+        "#,
+            serde_json::to_string(&expected).unwrap()
+        );
+        let config = Arc::new(serde_norway::from_str::<Config>(&config_yml).unwrap());
+        let channel = &config.channels[0];
+        assert_eq!(channel.channel_type, ChannelType::BS4K);
+        let result = ServiceScanner::scan_services_in_channel(
+            channel,
+            config.jobs.scan_services.command_for(channel.channel_type),
+            config.jobs.scan_services.timeout,
+            &stub,
+            &ctx,
+        )
+        .await;
+        assert_matches!(result, Ok(services) => {
+            assert_eq!(services.len(), 1);
+            assert_eq!(services[0].name, "bs4k-service");
+            assert_eq!(services[0].id, ServiceId::new(4.into(), 6.into()));
+        });
+
+        // And a GR channel keeps using the 2K command.
+        let config_yml = format!(
+            r#"
+            channels:
+              - name: gr
+                type: GR
+                channel: '0'
+            jobs:
+              scan-services:
+                command: echo '{}'
+                command-bs4k: false
+        "#,
+            serde_json::to_string(&expected).unwrap()
+        );
+        let config = Arc::new(serde_norway::from_str::<Config>(&config_yml).unwrap());
+        let channel = &config.channels[0];
+        assert_eq!(channel.channel_type, ChannelType::GR);
+        let result = ServiceScanner::scan_services_in_channel(
+            channel,
+            config.jobs.scan_services.command_for(channel.channel_type),
+            config.jobs.scan_services.timeout,
+            &stub,
+            &ctx,
+        )
+        .await;
+        assert_matches!(result, Ok(services) => {
+            assert_eq!(services.len(), 1);
+        });
+
+        // Default BS4K template is the TLV variant.
+        assert!(
+            ScanServicesJobConfig::default()
+                .command_for(ChannelType::BS4K)
+                .contains("scan-services-tlv")
+        );
     }
 }
