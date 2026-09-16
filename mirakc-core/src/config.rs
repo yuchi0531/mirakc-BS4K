@@ -276,6 +276,7 @@ impl Config {
                     .count(),
             "config.tuners: `name` must be a unique"
         );
+        self.validate_channel_routes();
         self.filters.validate();
         self.pre_filters
             .iter()
@@ -299,6 +300,30 @@ impl Config {
             .iter()
             .for_each(|(name, config)| config.validate(name));
         self.resource.validate();
+    }
+
+    fn validate_channel_routes(&self) {
+        for (i, channel) in self.channels.iter().enumerate() {
+            for (j, route) in channel.routes.iter().enumerate() {
+                validate!(
+                    !route.tuner.is_empty(),
+                    "config.channels[{i}].routes[{j}].tuner: must be a non-empty string"
+                );
+                if let Some(ref channel) = route.channel {
+                    validate!(
+                        !channel.is_empty(),
+                        "config.channels[{i}].routes[{j}].channel: must be a non-empty string"
+                    );
+                }
+                if !self.tuners.iter().any(|tuner| tuner.name == route.tuner) {
+                    fail!(
+                        "config.channels[{i}].routes[{j}]: \
+                         uses undefined tuner[{}]",
+                        route.tuner
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -526,6 +551,19 @@ pub struct ChannelConfig {
     pub excluded_services: Vec<Sid>,
     #[serde(default)]
     pub disabled: bool,
+    #[serde(default)]
+    pub routes: Vec<ChannelRouteConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+#[serde(deny_unknown_fields)]
+pub struct ChannelRouteConfig {
+    pub tuner: String,
+    #[serde(default)]
+    pub channel: Option<String>,
+    #[serde(default)]
+    pub extra_args: Option<String>,
 }
 
 impl ChannelConfig {
@@ -540,6 +578,12 @@ impl ChannelConfig {
                         tracing::warn!(
                             "Channels having the same `type` and `channel` \
                              should have the same `extra-args`"
+                        );
+                    }
+                    if ch.routes != channel.routes {
+                        tracing::warn!(
+                            "Channels having the same `type` and `channel` \
+                             should have the same `routes`"
                         );
                     }
                     if ch.services.is_empty() {
@@ -2400,6 +2444,7 @@ mod tests {
                 services: vec![],
                 excluded_services: vec![],
                 disabled: false,
+                routes: vec![],
             }
         }
 
@@ -2492,6 +2537,7 @@ mod tests {
                 services: vec![],
                 excluded_services: vec![],
                 disabled: false,
+                routes: vec![],
             }
         }
 
@@ -2626,6 +2672,234 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_channel_config_routes() {
+        let config = ChannelConfig {
+            name: "x".to_string(),
+            channel_type: ChannelType::GR,
+            channel: "y".to_string(),
+            extra_args: "".to_string(),
+            services: vec![],
+            excluded_services: vec![],
+            disabled: false,
+            routes: vec![
+                ChannelRouteConfig {
+                    tuner: "gr".to_string(),
+                    channel: None,
+                    extra_args: None,
+                },
+                ChannelRouteConfig {
+                    tuner: "catv".to_string(),
+                    channel: Some("42".to_string()),
+                    extra_args: Some("--args".to_string()),
+                },
+            ],
+        };
+
+        assert_eq!(
+            serde_norway::from_str::<ChannelConfig>(
+                r#"
+                name: x
+                type: GR
+                channel: y
+                routes:
+                  - tuner: gr
+                  - tuner: catv
+                    channel: '42'
+                    extra-args: --args
+            "#
+            )
+            .unwrap(),
+            config
+        );
+
+        assert_eq!(
+            toml::from_str::<ChannelConfig>(
+                r#"
+                name = "x"
+                type = "GR"
+                channel = "y"
+
+                [[routes]]
+                tuner = "gr"
+
+                [[routes]]
+                tuner = "catv"
+                channel = "42"
+                extra-args = "--args"
+            "#
+            )
+            .unwrap(),
+            config
+        );
+
+        let result = serde_norway::from_str::<ChannelConfig>(
+            r#"
+            name: x
+            type: GR
+            channel: y
+            routes:
+              - tuner: gr
+                unknown: value
+        "#,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_channel_config_normalize_routes() {
+        let config = ChannelConfig {
+            name: "ch".to_string(),
+            channel_type: ChannelType::GR,
+            channel: "1".to_string(),
+            extra_args: "".to_string(),
+            services: vec![],
+            excluded_services: vec![],
+            disabled: false,
+            routes: vec![ChannelRouteConfig {
+                tuner: "a".to_string(),
+                channel: None,
+                extra_args: None,
+            }],
+        };
+        // Routes are not merged.  The first definition wins like extra-args.
+        assert_eq!(
+            ChannelConfig::normalize(
+                serde_norway::from_str::<Vec<ChannelConfig>>(
+                    r#"
+                - name: ch
+                  type: GR
+                  channel: 1
+                  routes:
+                    - tuner: a
+                - name: ch
+                  type: GR
+                  channel: 1
+                  routes:
+                    - tuner: b
+            "#
+                )
+                .unwrap()
+            ),
+            vec![config]
+        );
+    }
+
+    #[test]
+    fn test_config_validate_channel_routes() {
+        let config = serde_norway::from_str::<Config>(
+            r#"
+            channels:
+              - name: test
+                type: GR
+                channel: test
+                routes:
+                  - tuner: tuner
+                  - tuner: disabled
+                    channel: test2
+                    extra-args: --args
+            tuners:
+              - name: tuner
+                types: [GR]
+                command: cat /dev/null
+              - name: disabled
+                types: [GR]
+                command: cat /dev/null
+                disabled: true
+            resource:
+              strings-yaml: /bin/sh
+            filters:
+              tuner-filter:
+                command: cat /dev/null
+              service-filter:
+                command: cat /dev/null
+              program-filter:
+                command: cat /dev/null
+            jobs:
+              scan-services:
+                command: cat /dev/null
+              sync-clocks:
+                command: cat /dev/null
+              update-schedules:
+                command: cat /dev/null
+            timeshift:
+              command: cat /dev/null
+        "#,
+        )
+        .unwrap();
+        config.validate(true);
+    }
+
+    #[test]
+    #[should_panic(expected = "config.channels[0].routes[0].tuner: must be a non-empty string")]
+    fn test_config_validate_channel_route_empty_tuner() {
+        let config = serde_norway::from_str::<Config>(
+            r#"
+            channels:
+              - name: test
+                type: GR
+                channel: test
+                routes:
+                  - tuner: ''
+            tuners:
+              - name: tuner
+                types: [GR]
+                command: cat /dev/null
+            resource:
+              strings-yaml: /bin/sh
+        "#,
+        )
+        .unwrap();
+        config.validate(true);
+    }
+
+    #[test]
+    #[should_panic(expected = "config.channels[0].routes[0].channel: must be a non-empty string")]
+    fn test_config_validate_channel_route_empty_channel() {
+        let config = serde_norway::from_str::<Config>(
+            r#"
+            channels:
+              - name: test
+                type: GR
+                channel: test
+                routes:
+                  - tuner: tuner
+                    channel: ''
+            tuners:
+              - name: tuner
+                types: [GR]
+                command: cat /dev/null
+            resource:
+              strings-yaml: /bin/sh
+        "#,
+        )
+        .unwrap();
+        config.validate(true);
+    }
+
+    #[test]
+    #[should_panic(expected = "config.channels[0].routes[0]: uses undefined tuner[no-such-tuner]")]
+    fn test_config_validate_channel_route_undefined_tuner() {
+        let config = serde_norway::from_str::<Config>(
+            r#"
+            channels:
+              - name: test
+                type: GR
+                channel: test
+                routes:
+                  - tuner: no-such-tuner
+            tuners:
+              - name: tuner
+                types: [GR]
+                command: cat /dev/null
+            resource:
+              strings-yaml: /bin/sh
+        "#,
+        )
+        .unwrap();
+        config.validate(true);
+    }
+
     fn channel_config() -> ChannelConfig {
         ChannelConfig {
             name: "test".to_string(),
@@ -2635,6 +2909,7 @@ mod tests {
             services: vec![],
             excluded_services: vec![],
             disabled: false,
+            routes: vec![],
         }
     }
 

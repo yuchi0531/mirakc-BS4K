@@ -1,14 +1,23 @@
 use std::collections::HashMap;
+use std::env;
 use std::fmt;
+use std::io::Cursor;
 use std::sync::Arc;
+use std::sync::LazyLock;
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use actlet::prelude::*;
+use bytes::BytesMut;
+use tokio::io::AsyncRead;
+use tokio::io::AsyncReadExt;
 
 use crate::broadcaster::*;
 use crate::command_util::CommandPipeline;
+use crate::command_util::CommandPipelineOutput;
 use crate::command_util::spawn_pipeline;
+use crate::config::ChannelRouteConfig;
 use crate::config::Config;
 use crate::config::ExcludedChannelConfig;
 use crate::config::FilterConfig;
@@ -18,6 +27,37 @@ use crate::epg::EpgChannel;
 use crate::error::Error;
 use crate::models::*;
 use crate::mpeg_ts_stream::MpegTsStream;
+
+// Start-up probe
+//
+// A fallback route is tried only when starting a tuner command fails.  A
+// command that exits immediately (e.g. because the tuner device is busy or
+// missing) does not fail at spawn time, so the first chunk is awaited with a
+// short timeout in order to detect such an early exit before any data.
+//
+// The timeout is not a failure.  A running command may simply have no data to
+// send yet (e.g. no signal), so the timeout only means that the start is
+// assumed to be successful.  This also keeps an unresponsive tuner from
+// stalling a streaming request for a long time.
+//
+// The data read by the probe is chained back in front of the output so that no
+// data is lost.
+
+const STARTUP_PROBE_TIMEOUT_MS_DEFAULT: u64 = 1000;
+
+static STARTUP_PROBE_TIMEOUT_MS: LazyLock<u64> = LazyLock::new(|| {
+    let timeout = env::var("MIRAKC_TUNER_STARTUP_PROBE_TIMEOUT_MS")
+        .ok()
+        .map(|s| {
+            s.parse::<u64>()
+                .expect("MIRAKC_TUNER_STARTUP_PROBE_TIMEOUT_MS must be a u64 value")
+        })
+        .unwrap_or(STARTUP_PROBE_TIMEOUT_MS_DEFAULT);
+    tracing::debug!(STARTUP_PROBE_TIMEOUT_MS = timeout);
+    timeout
+});
+
+const STARTUP_PROBE_MAX_BYTES: usize = 4096 * 8;
 
 // identifiers
 
@@ -187,6 +227,35 @@ impl TunerManager {
             return Err(Error::TunerUnavailable);
         }
 
+        let routes = self.find_channel_routes(channel);
+        if routes.is_empty() {
+            // Keep the legacy behavior for channels without routes.
+            return self.activate_tuner_by_priority(channel, user, ctx).await;
+        }
+        self.activate_tuner_by_routes(channel, &routes, user, ctx)
+            .await
+    }
+
+    fn find_channel_routes(&self, channel: &EpgChannel) -> Vec<ChannelRouteConfig> {
+        self.config
+            .channels
+            .iter()
+            .find(|config| {
+                config.channel_type == channel.channel_type && config.channel == channel.channel
+            })
+            .map(|config| config.routes.clone())
+            .unwrap_or_default()
+    }
+
+    async fn activate_tuner_by_priority<C>(
+        &mut self,
+        channel: &EpgChannel,
+        user: &TunerUser,
+        ctx: &C,
+    ) -> Result<TunerSubscription, Error>
+    where
+        C: Spawn,
+    {
         let found = self
             .tuners
             .iter_mut()
@@ -255,6 +324,181 @@ impl TunerManager {
         }
 
         tracing::warn!(%channel, %user.info, %user.priority, "No tuner available");
+        Err(Error::TunerUnavailable)
+    }
+
+    // Activate a tuner along the routes defined for the channel.  Each route
+    // is tried in the defined order and the first successful one is used.
+    // Only a failure to start the tuner command falls back to the next route.
+    async fn activate_tuner_by_routes<C>(
+        &mut self,
+        channel: &EpgChannel,
+        routes: &[ChannelRouteConfig],
+        user: &TunerUser,
+        ctx: &C,
+    ) -> Result<TunerSubscription, Error>
+    where
+        C: Spawn,
+    {
+        for (route_index, route) in routes.iter().enumerate() {
+            let effective = route.effective_channel(channel);
+
+            let tuner = match self
+                .tuners
+                .iter()
+                .position(|tuner| tuner.name == route.tuner)
+            {
+                Some(index) => &mut self.tuners[index],
+                None => {
+                    tracing::warn!(
+                        route.index = route_index,
+                        route.tuner = %route.tuner,
+                        %channel,
+                        "Route tuner is undefined or disabled, skipping"
+                    );
+                    continue;
+                }
+            };
+
+            if tuner.is_excluded_for(&effective) {
+                tracing::warn!(
+                    route.index = route_index,
+                    tuner.index = tuner.index,
+                    tuner.name = %tuner.name,
+                    %effective,
+                    "Route tuner is excluded for the channel, skipping"
+                );
+                continue;
+            }
+
+            // (a) Use a tuner reserved for the user.
+            if tuner.is_reserved_for(user) {
+                tracing::debug!(
+                    route.index = route_index,
+                    tuner.index = tuner.index,
+                    %effective,
+                    %user.info,
+                    "Use reserved tuner"
+                );
+                if !tuner.is_active() {
+                    let filters = Self::make_filter_commands(
+                        tuner,
+                        &effective,
+                        &self.config.filters.tuner_filter,
+                    )?;
+                    if let Err(err) = tuner
+                        .activate_with_startup_probe(&effective, filters, ctx)
+                        .await
+                    {
+                        tracing::warn!(
+                            route.index = route_index,
+                            tuner.index = tuner.index,
+                            tuner.name = %tuner.name,
+                            %effective,
+                            %err,
+                            "Failed to activate the reserved route tuner, trying the next route"
+                        );
+                        continue;
+                    }
+                }
+                let index = tuner.index;
+                self.event_emitters.emit(Event::StatusChanged(index)).await;
+                return Ok(tuner.subscribe(user));
+            }
+
+            // (b) Reuse a tuner already activated for the same channel.
+            if tuner.is_reuseable(&effective) {
+                tracing::debug!(
+                    route.index = route_index,
+                    tuner.index = tuner.index,
+                    %effective,
+                    %user.info,
+                    "Reuse active tuner"
+                );
+                let index = tuner.index;
+                self.event_emitters.emit(Event::StatusChanged(index)).await;
+                return Ok(tuner.subscribe(user));
+            }
+
+            // (c) Use an available tuner.
+            if tuner.is_available_for(&effective) {
+                tracing::debug!(
+                    route.index = route_index,
+                    tuner.index = tuner.index,
+                    %effective,
+                    %user.info,
+                    "Use tuner"
+                );
+                let filters = Self::make_filter_commands(
+                    tuner,
+                    &effective,
+                    &self.config.filters.tuner_filter,
+                )?;
+                if let Err(err) = tuner
+                    .activate_with_startup_probe(&effective, filters, ctx)
+                    .await
+                {
+                    tracing::warn!(
+                        route.index = route_index,
+                        tuner.index = tuner.index,
+                        tuner.name = %tuner.name,
+                        %effective,
+                        %err,
+                        "Failed to activate route tuner, trying the next route"
+                    );
+                    continue;
+                }
+                let index = tuner.index;
+                self.event_emitters.emit(Event::StatusChanged(index)).await;
+                return Ok(tuner.subscribe(user));
+            }
+
+            // (d) Grab the tuner from lower-priority users.
+            if tuner.can_grab(user.priority) {
+                tracing::debug!(
+                    route.index = route_index,
+                    tuner.index = tuner.index,
+                    %effective,
+                    %user.info,
+                    %user.priority,
+                    "Grab tuner"
+                );
+                let filters = Self::make_filter_commands(
+                    tuner,
+                    &effective,
+                    &self.config.filters.tuner_filter,
+                )?;
+                tuner.deactivate();
+                let index = tuner.index;
+                self.event_emitters.emit(Event::StatusChanged(index)).await;
+                if let Err(err) = tuner
+                    .activate_with_startup_probe(&effective, filters, ctx)
+                    .await
+                {
+                    tracing::warn!(
+                        route.index = route_index,
+                        tuner.index = tuner.index,
+                        tuner.name = %tuner.name,
+                        %effective,
+                        %err,
+                        "Failed to activate grabbed route tuner, trying the next route"
+                    );
+                    continue;
+                }
+                return Ok(tuner.subscribe(user));
+            }
+
+            // (e) The tuner is busy or restricted, try the next route.
+            tracing::debug!(
+                route.index = route_index,
+                tuner.index = tuner.index,
+                %effective,
+                %user.info,
+                "Route tuner is unavailable, trying the next route"
+            );
+        }
+
+        tracing::warn!(%channel, %user.info, %user.priority, num_routes = routes.len(), "No route available");
         Err(Error::TunerUnavailable)
     }
 
@@ -662,6 +906,37 @@ impl Tuner {
             .await
     }
 
+    // Activate the tuner and treat an early exit of the tuner command as a
+    // failure so that the caller can fall back to another route.  Only used
+    // when routes are defined.  The legacy `activate()` is kept as-is.
+    async fn activate_with_startup_probe<C>(
+        &mut self,
+        channel: &EpgChannel,
+        filters: Vec<String>,
+        ctx: &C,
+    ) -> Result<(), Error>
+    where
+        C: Spawn,
+    {
+        let command = match self.make_command(channel) {
+            Ok(command) => command,
+            Err(err) => {
+                tracing::error!(%err, tuner.index = self.index, %channel, "Failed to render the tuner command");
+                return Err(err);
+            }
+        };
+        self.activity
+            .activate_with_startup_probe(
+                self.index,
+                channel,
+                command,
+                filters,
+                self.time_limit,
+                ctx,
+            )
+            .await
+    }
+
     fn deactivate(&mut self) {
         self.activity.deactivate();
     }
@@ -755,6 +1030,36 @@ impl TunerActivity {
                 let session =
                     TunerSession::new(tuner_index, channel, command, filters, time_limit, ctx)
                         .await?;
+                *self = Self::Active(Box::new(session));
+                Ok(())
+            }
+            Self::Active(_) => panic!("Must be deactivated before activating"),
+        }
+    }
+
+    async fn activate_with_startup_probe<C>(
+        &mut self,
+        tuner_index: usize,
+        channel: &EpgChannel,
+        command: String,
+        filters: Vec<String>,
+        time_limit: u64,
+        ctx: &C,
+    ) -> Result<(), Error>
+    where
+        C: Spawn,
+    {
+        match self {
+            Self::Inactive => {
+                let session = TunerSession::new_with_startup_probe(
+                    tuner_index,
+                    channel,
+                    command,
+                    filters,
+                    time_limit,
+                    ctx,
+                )
+                .await?;
                 *self = Self::Active(Box::new(session));
                 Ok(())
             }
@@ -860,9 +1165,65 @@ impl TunerSession {
     where
         C: Spawn,
     {
+        let (id, pipeline, output) =
+            Self::build_pipeline(tuner_index, channel, command, &mut filters, ctx)?;
+        Self::activate(id, channel, pipeline, output, time_limit, ctx).await
+    }
+
+    // The same as `new()` except that the first chunk is awaited with a short
+    // timeout.  A command exiting before producing any data is reported as a
+    // failure so that the caller can fall back to another route.  The data
+    // read by the probe is chained back in front of the remaining output.
+    async fn new_with_startup_probe<C>(
+        tuner_index: usize,
+        channel: &EpgChannel,
+        command: String,
+        mut filters: Vec<String>,
+        time_limit: u64,
+        ctx: &C,
+    ) -> Result<TunerSession, Error>
+    where
+        C: Spawn,
+    {
+        let (id, pipeline, mut output) =
+            Self::build_pipeline(tuner_index, channel, command, &mut filters, ctx)?;
+        let timeout = Duration::from_millis(*STARTUP_PROBE_TIMEOUT_MS);
+        let first_chunk = match Self::probe_startup(&mut output, timeout).await {
+            Ok(first_chunk) => first_chunk,
+            Err(err) => {
+                tracing::warn!(
+                    %err,
+                    session.id = %id,
+                    %channel,
+                    "Tuner command exited before producing data"
+                );
+                return Err(err);
+            }
+        };
+        let reader = Cursor::new(first_chunk.unwrap_or_default()).chain(output);
+        Self::activate(id, channel, pipeline, reader, time_limit, ctx).await
+    }
+
+    fn build_pipeline<C>(
+        tuner_index: usize,
+        channel: &EpgChannel,
+        command: String,
+        filters: &mut Vec<String>,
+        ctx: &C,
+    ) -> Result<
+        (
+            TunerSessionId,
+            CommandPipeline<TunerSessionId>,
+            CommandPipelineOutput<TunerSessionId>,
+        ),
+        Error,
+    >
+    where
+        C: Spawn,
+    {
         let id = TunerSessionId::new(tuner_index);
         let mut commands = vec![command];
-        commands.append(&mut filters);
+        commands.append(filters);
         let mut pipeline = match spawn_pipeline(commands, id, "tuner", ctx) {
             Ok(pipeline) => pipeline,
             Err(err) => {
@@ -871,8 +1232,40 @@ impl TunerSession {
             }
         };
         let (_, output) = pipeline.take_endpoints();
+        Ok((id, pipeline, output))
+    }
+
+    // Wait for the first chunk for at most `timeout`.  A timeout is not a
+    // failure because the command may simply have no data to send yet (e.g.
+    // no signal).  An EOF before any data means the command exited on its own
+    // soon after starting.
+    async fn probe_startup<R>(output: &mut R, timeout: Duration) -> Result<Option<BytesMut>, Error>
+    where
+        R: AsyncRead + Unpin,
+    {
+        let mut chunk = BytesMut::with_capacity(STARTUP_PROBE_MAX_BYTES);
+        match tokio::time::timeout(timeout, output.read_buf(&mut chunk)).await {
+            Err(_) => Ok(None), // Timed out, assume a successful start.
+            Ok(Ok(0)) => Err(Error::TunerCommandExited), // EOF, early exit.
+            Ok(Ok(_)) => Ok(Some(chunk)),
+            Ok(Err(err)) => Err(err.into()),
+        }
+    }
+
+    async fn activate<R, C>(
+        id: TunerSessionId,
+        channel: &EpgChannel,
+        pipeline: CommandPipeline<TunerSessionId>,
+        reader: R,
+        time_limit: u64,
+        ctx: &C,
+    ) -> Result<TunerSession, Error>
+    where
+        R: AsyncRead + Send + Unpin + 'static,
+        C: Spawn,
+    {
         let broadcaster = ctx.spawn_actor(Broadcaster::new(id, time_limit)).await;
-        broadcaster.emit(BindStream(output)).await;
+        broadcaster.emit(BindStream(reader)).await;
         tracing::debug!(session.id = %id, %channel, "Activated");
 
         Ok(TunerSession {
@@ -965,6 +1358,23 @@ impl ExcludedChannelConfig {
                 channel_type,
                 channel,
             } => epg.channel_type == *channel_type && epg.channel == *channel,
+        }
+    }
+}
+
+impl ChannelRouteConfig {
+    // Apply the route overrides to the channel of the streaming request.
+    fn effective_channel(&self, channel: &EpgChannel) -> EpgChannel {
+        EpgChannel {
+            channel: self
+                .channel
+                .clone()
+                .unwrap_or_else(|| channel.channel.clone()),
+            extra_args: self
+                .extra_args
+                .clone()
+                .unwrap_or_else(|| channel.extra_args.clone()),
+            ..channel.clone()
         }
     }
 }
@@ -1471,6 +1881,570 @@ mod tests {
                 })
                 .await;
             assert_matches!(result, Ok(Ok(_)));
+        }
+        system.shutdown().await;
+    }
+
+    #[test(tokio::test)]
+    async fn test_routes_fallback_to_next_route() {
+        let system = System::new();
+        {
+            // The first route exits immediately without data, the second one
+            // keeps running.  Fallback must select the second route.
+            let config: Arc<Config> = Arc::new(
+                serde_norway::from_str(
+                    r#"
+                channels:
+                  - name: test
+                    type: GR
+                    channel: 0
+                    routes:
+                      - tuner: busy
+                      - tuner: working
+                tuners:
+                  - name: busy
+                    types: [GR]
+                    command: "true"
+                  - name: working
+                    types: [GR]
+                    command: "sleep 3"
+                "#,
+                )
+                .unwrap(),
+            );
+
+            let manager = system.spawn_actor(TunerManager::new(config)).await;
+
+            let result = manager
+                .call(StartStreaming {
+                    channel: create_channel("0"),
+                    user: create_user(0.into()),
+                    stream_id: None,
+                })
+                .await;
+            assert_matches!(result, Ok(Ok(stream)) => {
+                assert_eq!(stream.id().session_id.tuner_index, 1);
+            });
+        }
+        system.shutdown().await;
+    }
+
+    #[test(tokio::test)]
+    async fn test_routes_undefined_route_tuner_skipped() {
+        let system = System::new();
+        {
+            let config: Arc<Config> = Arc::new(
+                serde_norway::from_str(
+                    r#"
+                channels:
+                  - name: test
+                    type: GR
+                    channel: 0
+                    routes:
+                      - tuner: no-such-tuner
+                      - tuner: working
+                tuners:
+                  - name: working
+                    types: [GR]
+                    command: "sleep 3"
+                "#,
+                )
+                .unwrap(),
+            );
+
+            let manager = system.spawn_actor(TunerManager::new(config)).await;
+
+            let result = manager
+                .call(StartStreaming {
+                    channel: create_channel("0"),
+                    user: create_user(0.into()),
+                    stream_id: None,
+                })
+                .await;
+            assert_matches!(result, Ok(Ok(stream)) => {
+                assert_eq!(stream.id().session_id.tuner_index, 0);
+            });
+        }
+        system.shutdown().await;
+    }
+
+    #[test(tokio::test)]
+    async fn test_routes_excluded_route_tuner_skipped() {
+        let system = System::new();
+        {
+            let config: Arc<Config> = Arc::new(
+                serde_norway::from_str(
+                    r#"
+                channels:
+                  - name: test
+                    type: GR
+                    channel: 0
+                    routes:
+                      - tuner: excluded
+                      - tuner: working
+                tuners:
+                  - name: excluded
+                    types: [GR]
+                    command: "sleep 3"
+                    excluded-channels:
+                      - params:
+                          channel-type: GR
+                          channel: '0'
+                  - name: working
+                    types: [GR]
+                    command: "sleep 3"
+                "#,
+                )
+                .unwrap(),
+            );
+
+            let manager = system.spawn_actor(TunerManager::new(config)).await;
+
+            let result = manager
+                .call(StartStreaming {
+                    channel: create_channel("0"),
+                    user: create_user(0.into()),
+                    stream_id: None,
+                })
+                .await;
+            assert_matches!(result, Ok(Ok(stream)) => {
+                assert_eq!(stream.id().session_id.tuner_index, 1);
+            });
+        }
+        system.shutdown().await;
+    }
+
+    #[test(tokio::test)]
+    async fn test_routes_all_failed() {
+        let system = System::new();
+        {
+            let config: Arc<Config> = Arc::new(
+                serde_norway::from_str(
+                    r#"
+                channels:
+                  - name: test
+                    type: GR
+                    channel: 0
+                    routes:
+                      - tuner: busy1
+                      - tuner: busy2
+                tuners:
+                  - name: busy1
+                    types: [GR]
+                    command: "true"
+                  - name: busy2
+                    types: [GR]
+                    command: "true"
+                "#,
+                )
+                .unwrap(),
+            );
+
+            let manager = system.spawn_actor(TunerManager::new(config)).await;
+
+            let result = manager
+                .call(StartStreaming {
+                    channel: create_channel("0"),
+                    user: create_user(0.into()),
+                    stream_id: None,
+                })
+                .await;
+            assert_matches!(result, Ok(Err(Error::TunerUnavailable)));
+        }
+        system.shutdown().await;
+    }
+
+    #[test(tokio::test)]
+    async fn test_routes_busy_falls_back() {
+        let system = System::new();
+        {
+            let config: Arc<Config> = Arc::new(
+                serde_norway::from_str(
+                    r#"
+                channels:
+                  - name: test
+                    type: GR
+                    channel: 0
+                    routes:
+                      - tuner: busy
+                      - tuner: working
+                  - name: other
+                    type: GR
+                    channel: 1
+                    routes:
+                      - tuner: busy
+                tuners:
+                  - name: busy
+                    types: [GR]
+                    command: "sleep 3"
+                  - name: working
+                    types: [GR]
+                    command: "sleep 3"
+                "#,
+                )
+                .unwrap(),
+            );
+
+            let manager = system.spawn_actor(TunerManager::new(config)).await;
+
+            // Occupy the `busy` tuner with the `other` channel.
+            let result = manager
+                .call(StartStreaming {
+                    channel: create_channel("1"),
+                    user: create_user(1.into()),
+                    stream_id: None,
+                })
+                .await;
+            assert_matches!(result, Ok(Ok(stream)) => {
+                assert_eq!(stream.id().session_id.tuner_index, 0);
+            });
+
+            // The first route is busy and the user cannot grab it, so the
+            // second route is used.
+            let result = manager
+                .call(StartStreaming {
+                    channel: create_channel("0"),
+                    user: create_user(0.into()),
+                    stream_id: None,
+                })
+                .await;
+            assert_matches!(result, Ok(Ok(stream)) => {
+                assert_eq!(stream.id().session_id.tuner_index, 1);
+            });
+        }
+        system.shutdown().await;
+    }
+
+    #[test(tokio::test)]
+    async fn test_routes_no_reserved_tuner_outside_routes() {
+        let system = System::new();
+        {
+            // A tuner is reserved for the user, but it is not listed in the
+            // routes.  It must not be used.
+            let config: Arc<Config> = Arc::new(
+                serde_norway::from_str(
+                    r#"
+                channels:
+                  - name: test
+                    type: GR
+                    channel: 0
+                    routes:
+                      - tuner: route
+                tuners:
+                  - name: reserved
+                    types: [GR]
+                    command: "sleep 3"
+                  - name: route
+                    types: [GR]
+                    command: "true"
+                onair-program-trackers:
+                  tracker:
+                    local:
+                      channel-types: [GR]
+                      uses:
+                        tuner: reserved
+                "#,
+                )
+                .unwrap(),
+            );
+
+            let manager = system.spawn_actor(TunerManager::new(config)).await;
+
+            // The reserved tuner is not in the routes and the route tuner
+            // exits immediately, so nothing is available.
+            let result = manager
+                .call(StartStreaming {
+                    channel: create_channel("0"),
+                    user: TunerUser {
+                        info: TunerUserInfo::OnairProgramTracker("tracker".to_string()),
+                        priority: 0.into(),
+                    },
+                    stream_id: None,
+                })
+                .await;
+            assert_matches!(result, Ok(Err(Error::TunerUnavailable)));
+        }
+        system.shutdown().await;
+    }
+
+    #[test(tokio::test)]
+    async fn test_routes_effective_channel() {
+        let system = System::new();
+        {
+            // The route overrides the channel.  The tuner command must render
+            // the overridden channel instead of the requested one.
+            let config: Arc<Config> = Arc::new(
+                serde_norway::from_str(
+                    r#"
+                channels:
+                  - name: test
+                    type: GR
+                    channel: 0
+                    routes:
+                      - tuner: route
+                        channel: CATV
+                        extra-args: --args
+                tuners:
+                  - name: route
+                    types: [GR]
+                    command: >-
+                      sh -c 'test "{{{channel}}}" = CATV && test "{{{extra_args}}}" = --args && sleep 3'
+                "#,
+                )
+                .unwrap(),
+            );
+
+            let manager = system.spawn_actor(TunerManager::new(config)).await;
+
+            let result = manager
+                .call(StartStreaming {
+                    channel: create_channel("0"),
+                    user: create_user(0.into()),
+                    stream_id: None,
+                })
+                .await;
+            assert_matches!(result, Ok(Ok(stream)) => {
+                assert_eq!(stream.id().session_id.tuner_index, 0);
+            });
+        }
+        system.shutdown().await;
+    }
+
+    #[test(tokio::test)]
+    async fn test_routes_reuse_tuner() {
+        let system = System::new();
+        {
+            let config: Arc<Config> = Arc::new(
+                serde_norway::from_str(
+                    r#"
+                channels:
+                  - name: test
+                    type: GR
+                    channel: 0
+                    routes:
+                      - tuner: route
+                tuners:
+                  - name: route
+                    types: [GR]
+                    command: "sleep 3"
+                "#,
+                )
+                .unwrap(),
+            );
+
+            let manager = system.spawn_actor(TunerManager::new(config)).await;
+
+            let result = manager
+                .call(StartStreaming {
+                    channel: create_channel("0"),
+                    user: create_user(0.into()),
+                    stream_id: None,
+                })
+                .await;
+            let stream1 = assert_matches!(result, Ok(Ok(stream)) => {
+                assert_eq!(stream.id().session_id.tuner_index, 0);
+                stream
+            });
+
+            // Reuse the same tuner via the same route.
+            let result = manager
+                .call(StartStreaming {
+                    channel: create_channel("0"),
+                    user: create_user(1.into()),
+                    stream_id: None,
+                })
+                .await;
+            assert_matches!(result, Ok(Ok(stream)) => {
+                assert_eq!(stream.id().session_id, stream1.id().session_id);
+                assert_ne!(stream.id(), stream1.id());
+            });
+        }
+        system.shutdown().await;
+    }
+
+    #[test]
+    fn test_route_effective_channel() {
+        let channel = channel_gr!("name", "original");
+        let route = ChannelRouteConfig {
+            tuner: "tuner".to_string(),
+            channel: Some("overridden".to_string()),
+            extra_args: Some("--args".to_string()),
+        };
+        let effective = route.effective_channel(&channel);
+        assert_eq!(effective.channel, "overridden");
+        assert_eq!(effective.extra_args, "--args");
+        assert_eq!(effective.name, "name");
+        assert_eq!(effective.channel_type, ChannelType::GR);
+
+        let route = ChannelRouteConfig {
+            tuner: "tuner".to_string(),
+            channel: None,
+            extra_args: None,
+        };
+        let effective = route.effective_channel(&channel);
+        assert_eq!(effective.channel, "original");
+        assert_eq!(effective.extra_args, "");
+        assert_eq!(effective, channel);
+    }
+
+    #[test]
+    fn test_route_command_uses_effective_channel() {
+        let mut config = create_config("true".to_string());
+        config.command = "tuner {{{channel}}} {{{extra_args}}}".to_string();
+        let tuner = Tuner::new(0, &config);
+        let channel = channel_gr!("name", "original");
+        let route = ChannelRouteConfig {
+            tuner: "tuner".to_string(),
+            channel: Some("overridden".to_string()),
+            extra_args: Some("--args".to_string()),
+        };
+
+        let command = tuner
+            .make_command(&route.effective_channel(&channel))
+            .unwrap();
+        assert_eq!(command, "tuner overridden --args");
+
+        // Without overrides, the requested channel is used.
+        let route = ChannelRouteConfig {
+            tuner: "tuner".to_string(),
+            channel: None,
+            extra_args: None,
+        };
+        let command = tuner
+            .make_command(&route.effective_channel(&channel))
+            .unwrap();
+        assert_eq!(command, "tuner original ");
+    }
+
+    #[test(tokio::test)]
+    async fn test_routes_order() {
+        let system = System::new();
+        {
+            // Routes are tried in the defined order even if the tuner comes
+            // later in the tuners list.
+            let config: Arc<Config> = Arc::new(
+                serde_norway::from_str(
+                    r#"
+                channels:
+                  - name: test
+                    type: GR
+                    channel: 0
+                    routes:
+                      - tuner: second
+                      - tuner: first
+                tuners:
+                  - name: first
+                    types: [GR]
+                    command: "sleep 3"
+                  - name: second
+                    types: [GR]
+                    command: "sleep 3"
+                "#,
+                )
+                .unwrap(),
+            );
+
+            let manager = system.spawn_actor(TunerManager::new(config)).await;
+
+            let result = manager
+                .call(StartStreaming {
+                    channel: create_channel("0"),
+                    user: create_user(0.into()),
+                    stream_id: None,
+                })
+                .await;
+            assert_matches!(result, Ok(Ok(stream)) => {
+                assert_eq!(stream.id().session_id.tuner_index, 1);
+            });
+        }
+        system.shutdown().await;
+    }
+
+    #[test(tokio::test)]
+    async fn test_routes_spawn_failure_falls_back() {
+        let system = System::new();
+        {
+            // The first route fails to build the tuner command, the second
+            // one keeps running.  A spawn failure must fall back as well.
+            let config: Arc<Config> = Arc::new(
+                serde_norway::from_str(
+                    r#"
+                channels:
+                  - name: test
+                    type: GR
+                    channel: 0
+                    routes:
+                      - tuner: broken
+                      - tuner: working
+                tuners:
+                  - name: broken
+                    types: [GR]
+                    command: "'"
+                  - name: working
+                    types: [GR]
+                    command: "sleep 3"
+                "#,
+                )
+                .unwrap(),
+            );
+
+            let manager = system.spawn_actor(TunerManager::new(config)).await;
+
+            let result = manager
+                .call(StartStreaming {
+                    channel: create_channel("0"),
+                    user: create_user(0.into()),
+                    stream_id: None,
+                })
+                .await;
+            assert_matches!(result, Ok(Ok(stream)) => {
+                assert_eq!(stream.id().session_id.tuner_index, 1);
+            });
+        }
+        system.shutdown().await;
+    }
+
+    #[test(tokio::test)]
+    async fn test_routes_no_signal_does_not_fall_back() {
+        let system = System::new();
+        {
+            // The first route produces no data at all (no signal).  A timeout
+            // of the startup probe is not a failure, so the first route must
+            // be selected.
+            let config: Arc<Config> = Arc::new(
+                serde_norway::from_str(
+                    r#"
+                channels:
+                  - name: test
+                    type: GR
+                    channel: 0
+                    routes:
+                      - tuner: no-signal
+                      - tuner: working
+                tuners:
+                  - name: no-signal
+                    types: [GR]
+                    command: "sleep 3"
+                  - name: working
+                    types: [GR]
+                    command: "sleep 3"
+                "#,
+                )
+                .unwrap(),
+            );
+
+            let manager = system.spawn_actor(TunerManager::new(config)).await;
+
+            let result = manager
+                .call(StartStreaming {
+                    channel: create_channel("0"),
+                    user: create_user(0.into()),
+                    stream_id: None,
+                })
+                .await;
+            assert_matches!(result, Ok(Ok(stream)) => {
+                assert_eq!(stream.id().session_id.tuner_index, 0);
+            });
         }
         system.shutdown().await;
     }
