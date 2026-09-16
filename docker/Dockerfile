@@ -41,9 +41,6 @@ COPY --from=mirakc-tools /usr/local/bin /usr/local/bin/
 COPY --from=mirakc-build /usr/local/bin/mirakc /usr/local/bin/
 COPY --from=mirakc-arib-tlv-build /usr/local/bin/mirakc-arib-tlv /usr/local/bin/
 COPY --from=mirakc-build /build/resources/strings.yml /etc/mirakc/strings.yml
-# Bundled Web UI.  Serve it by setting server.mounts in config.yml.
-# See docs/web-ui.md for details.
-COPY --from=mirakc-build /build/webui/miraview /usr/share/miraview
 ARG PROFILE=release
 RUN --mount=type=bind,source=./docker/build-scripts,target=/build-scripts/ \
     sh /build-scripts/debian.sh mirakc $PROFILE
@@ -91,9 +88,6 @@ RUN --mount=type=bind,from=mirakc-archive,source=/archive.tar.gz,target=/archive
     sh /build-scripts/alpine.sh mirakc $PROFILE
 # mirakc-arib-tlv is included in /archive.tar.gz because it lives in
 # /usr/local/bin of the mirakc-debian image.
-# Bundled Web UI.  Serve it by setting server.mounts in config.yml.
-# See docs/web-ui.md for details.
-COPY --from=mirakc-build /build/webui/miraview /usr/share/miraview
 ENV MIRAKC_CONFIG=/etc/mirakc/config.yml
 ENV MIRAKC_BUILD_PROFILE=$PROFILE
 EXPOSE 40772
