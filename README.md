@@ -1,3 +1,8 @@
+# 本フォークについて
+自分の環境で使うための自家用フォークです。自分が欲しい機能だけつけます
+## 現在の主な変更点
+- mirakc-arib-tlvによりbs4kのmmt/tlv対応
+- channels.ymlにroutesフィールドを追加しcatvなど別経路で同じ放送波が受信できる場合に対応(Inspired by [Mahiron](https://github.com/rokoucha/Mahiron))
 # mirakc
 
 > A Mirakurun-compatible PVR backend written in Rust
