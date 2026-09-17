@@ -1459,6 +1459,88 @@ async fn test_x_mirakurun_priority() {
 }
 
 #[test(tokio::test)]
+async fn test_x_mirakc_tuner() {
+    let system = System::new();
+
+    let config: Arc<Config> = Arc::new(
+        serde_norway::from_str::<Config>(
+            r#"
+            tuners:
+              - name: gr1
+                types: [GR]
+                command: >-
+                  sh -c 'printf x; sleep 3'
+              - name: gr2
+                types: [GR]
+                command: >-
+                  sh -c 'printf y; sleep 3'
+            "#,
+        )
+        .unwrap()
+        .normalize(),
+    );
+    let tuner_manager = system
+        .spawn_actor(crate::tuner::TunerManager::new(config.clone()))
+        .await;
+    let app = build_app(config.clone())
+        .layer(helper::ReplaceConnectInfoLayer::new(Some(PeerInfo::Test)))
+        .with_state(Arc::new(AppState {
+            config: config.clone(),
+            string_table: string_table_for_test(),
+            tuner_manager: tuner_manager.clone(),
+            epg: EpgStub,
+            recording_manager: RecordingManagerStub,
+            timeshift_manager: TimeshiftManagerStub,
+            onair_manager: OnairProgramManagerStub,
+            spawner: actlet::stubs::Context::default(),
+        }));
+
+    // Without the header, the first available tuner is used as before.
+    let req = Request::get("/api/channels/GR/ch/stream")
+        .header(HOST, "mirakc:40772")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert!(res.headers().contains_key(X_MIRAKURUN_TUNER_USER_ID));
+    let tuner = tuner_manager
+        .call(crate::tuner::QueryTuner(0))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(tuner.is_using);
+    drop(res);
+
+    // The tuner specified by the header is used.
+    let req = Request::get("/api/channels/GR/ch/stream")
+        .header(HOST, "mirakc:40772")
+        .header("X-Mirakc-Tuner", "gr2")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert!(res.headers().contains_key(X_MIRAKURUN_TUNER_USER_ID));
+    let tuner = tuner_manager
+        .call(crate::tuner::QueryTuner(1))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(tuner.is_using);
+    drop(res);
+
+    // An unknown tuner name results in a client error.
+    let req = Request::get("/api/channels/GR/ch/stream")
+        .header(HOST, "mirakc:40772")
+        .header("X-Mirakc-Tuner", "no-such-tuner")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    system.shutdown().await;
+}
+
+#[test(tokio::test)]
 async fn test_access_control_private_addr() {
     let res = get_with_test_config(
         "/api/version",

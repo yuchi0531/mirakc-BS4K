@@ -32,7 +32,9 @@ pub const BS4K_PROGRAM_LEVEL_UNSUPPORTED: &str = "BS4K program-level stream is u
 /// instead of a bare `ClockNotSynced` failure.
 pub fn ensure_program_level_supported(channel_type: ChannelType) -> Result<(), Error> {
     if is_tlv_passthrough(channel_type) {
-        return Err(Error::InvalidRequest(BS4K_PROGRAM_LEVEL_UNSUPPORTED));
+        return Err(Error::InvalidRequest(
+            BS4K_PROGRAM_LEVEL_UNSUPPORTED.to_string(),
+        ));
     }
     Ok(())
 }

@@ -103,6 +103,7 @@ where
                 channel: channel.clone().into(),
                 user,
                 stream_id: None,
+                tuner: None,
             })
             .await??;
 

@@ -140,7 +140,7 @@ impl WebRecordingScheduleInput {
             }
             None => {
                 if !config.recording.is_records_api_enabled() {
-                    return Err(Error::InvalidRequest("contentPath is required"));
+                    return Err(Error::InvalidRequest("contentPath is required".to_string()));
                 }
             }
         }
@@ -679,6 +679,33 @@ where
             .unwrap_or_default();
 
         Ok(TunerUser { info, priority })
+    }
+}
+
+/// The name of the tuner to use, extracted from the `X-Mirakc-Tuner` header.
+///
+/// The value is `None` when the header is missing, empty or not a valid UTF-8
+/// string.  When multiple headers are specified, the last one is used.
+#[derive(Debug, Default)]
+pub(in crate::web) struct PinnedTuner(pub Option<String>);
+
+impl<S> FromRequestParts<S> for PinnedTuner
+where
+    S: Send + Sync,
+{
+    type Rejection = Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        let name = parts
+            .headers
+            .get_all(super::X_MIRAKC_TUNER)
+            .iter()
+            .next_back()
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(String::from);
+        Ok(PinnedTuner(name))
     }
 }
 

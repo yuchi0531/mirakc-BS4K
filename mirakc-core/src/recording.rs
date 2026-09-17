@@ -1103,6 +1103,7 @@ where
                     priority: schedule.options.priority.into(),
                 },
                 stream_id: None,
+                tuner: None,
             })
             .await??;
 
@@ -1408,7 +1409,7 @@ impl<T, E, O> RecordingManager<T, E, O> {
                 ?record_path,
                 "Cannot remove the record while it's recording"
             );
-            return Err(Error::InvalidRequest("Now recording"));
+            return Err(Error::InvalidRequest("Now recording".to_string()));
         }
 
         let mut record_removed = false;
@@ -4548,7 +4549,7 @@ pub(crate) mod stub {
             msg: RemoveRecord,
         ) -> actlet::Result<<RemoveRecord as Message>::Reply> {
             match msg.id.value() {
-                "recording" => Ok(Err(Error::InvalidRequest(""))),
+                "recording" => Ok(Err(Error::InvalidRequest(String::new()))),
                 "finished" => Ok(Ok((true, msg.purge))),
                 "no-content" => Ok(Ok((true, false))),
                 _ => Ok(Err(Error::RecordNotFound)),

@@ -43,7 +43,7 @@ pub enum Error {
     #[error("Timeshift config inconsistent")]
     TimeshiftConfigInconsistent,
     #[error("Invalid request: {0}")]
-    InvalidRequest(&'static str),
+    InvalidRequest(String),
     #[error("Wrong configuration: {0}")]
     WrongConfig(&'static str),
     #[error("Command failed: {0}")]

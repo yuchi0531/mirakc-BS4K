@@ -209,6 +209,7 @@ impl TunerManager {
         channel: &EpgChannel,
         user: &TunerUser,
         stream_id: &Option<TunerSubscriptionId>,
+        tuner: &Option<String>,
         ctx: &C,
     ) -> Result<TunerSubscription, Error>
     where
@@ -225,6 +226,12 @@ impl TunerManager {
             }
             tracing::error!(tuner.index, %channel, %user.info, stream.id = %stream_id, "Specified tuner is unavailable");
             return Err(Error::TunerUnavailable);
+        }
+
+        // A pinned tuner ignores the routes defined for the channel and must
+        // be used even if another tuner is available.
+        if let Some(tuner) = tuner {
+            return self.activate_tuner_by_name(channel, tuner, user, ctx).await;
         }
 
         let routes = self.find_channel_routes(channel);
@@ -502,6 +509,166 @@ impl TunerManager {
         Err(Error::TunerUnavailable)
     }
 
+    // Activate the tuner pinned by the client via the `X-Mirakc-Tuner` header.
+    // Unlike the route-based activation, no fallback is performed: any failure
+    // results in an error without trying another tuner or the channel routes.
+    async fn activate_tuner_by_name<C>(
+        &mut self,
+        channel: &EpgChannel,
+        name: &str,
+        user: &TunerUser,
+        ctx: &C,
+    ) -> Result<TunerSubscription, Error>
+    where
+        C: Spawn,
+    {
+        // Disabled tuners are not loaded into `self.tuners` and thus unknown.
+        let index = match self.tuners.iter().position(|tuner| tuner.name == name) {
+            Some(index) => index,
+            None => {
+                tracing::warn!(
+                    tuner.name = name,
+                    %channel,
+                    %user.info,
+                    "Pinned tuner is undefined or disabled"
+                );
+                return Err(Error::InvalidRequest(format!(
+                    "Unknown tuner specified by the X-Mirakc-Tuner header: {name}"
+                )));
+            }
+        };
+        let tuner = &mut self.tuners[index];
+
+        if tuner.is_excluded_for(channel) {
+            tracing::warn!(
+                tuner.index = tuner.index,
+                tuner.name = %tuner.name,
+                %channel,
+                %user.info,
+                "Pinned tuner is excluded for the channel"
+            );
+            return Err(Error::TunerUnavailable);
+        }
+
+        // (a) Use the tuner reserved for the user.
+        if tuner.is_reserved_for(user) {
+            tracing::debug!(
+                tuner.index = tuner.index,
+                tuner.name = %tuner.name,
+                %channel,
+                %user.info,
+                "Use pinned reserved tuner"
+            );
+            if !tuner.is_active() {
+                let filters =
+                    Self::make_filter_commands(tuner, channel, &self.config.filters.tuner_filter)?;
+                if let Err(err) = tuner
+                    .activate_with_startup_probe(channel, filters, ctx)
+                    .await
+                {
+                    tracing::warn!(
+                        tuner.index = tuner.index,
+                        tuner.name = %tuner.name,
+                        %channel,
+                        %user.info,
+                        %err,
+                        "Failed to activate pinned tuner"
+                    );
+                    return Err(Error::TunerUnavailable);
+                }
+            }
+            let index = tuner.index;
+            self.event_emitters.emit(Event::StatusChanged(index)).await;
+            return Ok(tuner.subscribe(user));
+        }
+
+        // (b) Reuse the tuner already activated for the same channel.
+        if tuner.is_reuseable(channel) {
+            tracing::debug!(
+                tuner.index = tuner.index,
+                tuner.name = %tuner.name,
+                %channel,
+                %user.info,
+                "Reuse pinned tuner"
+            );
+            let index = tuner.index;
+            self.event_emitters.emit(Event::StatusChanged(index)).await;
+            return Ok(tuner.subscribe(user));
+        }
+
+        // (c) Use the available tuner.
+        if tuner.is_available_for(channel) {
+            tracing::debug!(
+                tuner.index = tuner.index,
+                tuner.name = %tuner.name,
+                %channel,
+                %user.info,
+                "Use pinned tuner"
+            );
+            let filters =
+                Self::make_filter_commands(tuner, channel, &self.config.filters.tuner_filter)?;
+            if let Err(err) = tuner
+                .activate_with_startup_probe(channel, filters, ctx)
+                .await
+            {
+                tracing::warn!(
+                    tuner.index = tuner.index,
+                    tuner.name = %tuner.name,
+                    %channel,
+                    %user.info,
+                    %err,
+                    "Failed to activate pinned tuner"
+                );
+                return Err(Error::TunerUnavailable);
+            }
+            let index = tuner.index;
+            self.event_emitters.emit(Event::StatusChanged(index)).await;
+            return Ok(tuner.subscribe(user));
+        }
+
+        // (d) Grab the tuner from lower-priority users.
+        if tuner.can_grab(user.priority) {
+            tracing::debug!(
+                tuner.index = tuner.index,
+                tuner.name = %tuner.name,
+                %channel,
+                %user.info,
+                %user.priority,
+                "Grab pinned tuner"
+            );
+            let filters =
+                Self::make_filter_commands(tuner, channel, &self.config.filters.tuner_filter)?;
+            tuner.deactivate();
+            let index = tuner.index;
+            self.event_emitters.emit(Event::StatusChanged(index)).await;
+            if let Err(err) = tuner
+                .activate_with_startup_probe(channel, filters, ctx)
+                .await
+            {
+                tracing::warn!(
+                    tuner.index = tuner.index,
+                    tuner.name = %tuner.name,
+                    %channel,
+                    %user.info,
+                    %err,
+                    "Failed to activate grabbed pinned tuner"
+                );
+                return Err(Error::TunerUnavailable);
+            }
+            return Ok(tuner.subscribe(user));
+        }
+
+        // (e) The tuner is busy or restricted.
+        tracing::warn!(
+            tuner.index = tuner.index,
+            tuner.name = %tuner.name,
+            %channel,
+            %user.info,
+            "Pinned tuner is unavailable"
+        );
+        Err(Error::TunerUnavailable)
+    }
+
     fn deactivate_tuner(&mut self, id: TunerSubscriptionId) {
         self.tuners[id.session_id.tuner_index].deactivate();
     }
@@ -686,6 +853,11 @@ pub struct StartStreaming {
     pub channel: EpgChannel,
     pub user: TunerUser,
     pub stream_id: Option<TunerSubscriptionId>,
+    /// The name of the tuner pinned by the client.
+    ///
+    /// When specified, the tuner is used as-is without any fallback.  The
+    /// channel routes are ignored.
+    pub tuner: Option<String>,
 }
 
 #[async_trait]
@@ -695,7 +867,7 @@ impl Handler<StartStreaming> for TunerManager {
         msg: StartStreaming,
         ctx: &mut Context<Self>,
     ) -> <StartStreaming as Message>::Reply {
-        tracing::debug!(msg.name = "StartStreaming", %msg.channel, %msg.user.info, %msg.user.priority);
+        tracing::debug!(msg.name = "StartStreaming", %msg.channel, %msg.user.info, %msg.user.priority, msg.tuner = ?msg.tuner);
 
         if self.stopping {
             tracing::debug!("Ignore StartStreaming requests during shutdown");
@@ -703,7 +875,7 @@ impl Handler<StartStreaming> for TunerManager {
         }
 
         let subscription = self
-            .activate_tuner(&msg.channel, &msg.user, &msg.stream_id, ctx)
+            .activate_tuner(&msg.channel, &msg.user, &msg.stream_id, &msg.tuner, ctx)
             .await?;
 
         let result = subscription
@@ -1449,6 +1621,7 @@ mod tests {
                     channel: create_channel("0"),
                     user: create_user(0.into()),
                     stream_id: None,
+                    tuner: None,
                 })
                 .await;
             let stream1 = assert_matches!(result, Ok(Ok(stream)) => {
@@ -1462,6 +1635,7 @@ mod tests {
                     channel: create_channel("0"),
                     user: create_user(1.into()),
                     stream_id: None,
+                    tuner: None,
                 })
                 .await;
             assert_matches!(result, Ok(Ok(stream)) => {
@@ -1475,6 +1649,7 @@ mod tests {
                     channel: create_channel("1"),
                     user: create_user(1.into()),
                     stream_id: None,
+                    tuner: None,
                 })
                 .await;
             assert_matches!(result, Ok(Err(Error::TunerUnavailable)));
@@ -1485,6 +1660,7 @@ mod tests {
                     channel: create_channel("1"),
                     user: create_user(2.into()),
                     stream_id: None,
+                    tuner: None,
                 })
                 .await;
             assert_matches!(result, Ok(Ok(stream)) => {
@@ -1501,6 +1677,7 @@ mod tests {
                         priority: 0.into(),
                     },
                     stream_id: None,
+                    tuner: None,
                 })
                 .await;
             assert_matches!(result, Ok(Ok(stream)) => {
@@ -1545,6 +1722,7 @@ mod tests {
                         priority: 0.into(),
                     },
                     stream_id: None,
+                    tuner: None,
                 })
                 .await;
             assert_matches!(result, Ok(Ok(stream)) => {
@@ -1562,6 +1740,7 @@ mod tests {
                     channel: create_channel("0"),
                     user: create_user(0.into()), // not allowed
                     stream_id: None,
+                    tuner: None,
                 })
                 .await;
             assert_matches!(result, Ok(Err(Error::TunerUnavailable)));
@@ -1604,6 +1783,7 @@ mod tests {
                     channel: create_channel("0"), // allowed
                     user: create_user(0.into()),
                     stream_id: None,
+                    tuner: None,
                 })
                 .await;
             assert_matches!(result, Ok(Ok(stream)) => {
@@ -1621,6 +1801,7 @@ mod tests {
                     channel: create_channel("1"), // not allowed
                     user: create_user(0.into()),
                     stream_id: None,
+                    tuner: None,
                 })
                 .await;
             assert_matches!(result, Ok(Err(Error::TunerUnavailable)));
@@ -1656,6 +1837,7 @@ mod tests {
                     channel: create_channel("1"),
                     user: create_user(1.into()),
                     stream_id: None,
+                    tuner: None,
                 })
                 .await;
             let _stream0 = assert_matches!(result, Ok(Ok(stream)) => {
@@ -1668,6 +1850,7 @@ mod tests {
                     channel: create_channel("0"),
                     user: create_user(0.into()),
                     stream_id: None,
+                    tuner: None,
                 })
                 .await;
             let _stream1 = assert_matches!(result, Ok(Ok(stream)) => {
@@ -1681,6 +1864,7 @@ mod tests {
                     channel: create_channel("2"),
                     user: create_user(2.into()),
                     stream_id: None,
+                    tuner: None,
                 })
                 .await;
             assert_matches!(result, Ok(Ok(stream)) => {
@@ -1698,6 +1882,7 @@ mod tests {
                     channel: create_channel("0"),
                     user: create_user(0.into()),
                     stream_id: None,
+                    tuner: None,
                 })
                 .await;
             let _stream0 = assert_matches!(result, Ok(Ok(stream)) => {
@@ -1710,6 +1895,7 @@ mod tests {
                     channel: create_channel("1"),
                     user: create_user(1.into()),
                     stream_id: None,
+                    tuner: None,
                 })
                 .await;
             let _stream1 = assert_matches!(result, Ok(Ok(stream)) => {
@@ -1723,6 +1909,7 @@ mod tests {
                     channel: create_channel("2"),
                     user: create_user(2.into()),
                     stream_id: None,
+                    tuner: None,
                 })
                 .await;
             assert_matches!(result, Ok(Ok(stream)) => {
@@ -1741,6 +1928,7 @@ mod tests {
                     channel: create_channel("0"),
                     user: create_user(0.into()),
                     stream_id: None,
+                    tuner: None,
                 })
                 .await;
             let _stream0 = assert_matches!(result, Ok(Ok(stream)) => {
@@ -1753,6 +1941,7 @@ mod tests {
                     channel: create_channel("1"),
                     user: create_user(0.into()),
                     stream_id: None,
+                    tuner: None,
                 })
                 .await;
             let _stream1 = assert_matches!(result, Ok(Ok(stream)) => {
@@ -1765,6 +1954,7 @@ mod tests {
                     channel: create_channel("0"),
                     user: create_user(0.into()),
                     stream_id: None,
+                    tuner: None,
                 })
                 .await;
             let _stream2 = assert_matches!(result, Ok(Ok(stream)) => {
@@ -1778,6 +1968,7 @@ mod tests {
                     channel: create_channel("2"),
                     user: create_user(2.into()),
                     stream_id: None,
+                    tuner: None,
                 })
                 .await;
             assert_matches!(result, Ok(Ok(stream)) => {
@@ -1796,6 +1987,7 @@ mod tests {
                     channel: create_channel("0"),
                     user: create_user(0.into()),
                     stream_id: None,
+                    tuner: None,
                 })
                 .await;
             let _stream0 = assert_matches!(result, Ok(Ok(stream)) => {
@@ -1808,6 +2000,7 @@ mod tests {
                     channel: create_channel("1"),
                     user: create_user(0.into()),
                     stream_id: None,
+                    tuner: None,
                 })
                 .await;
             let _stream1 = assert_matches!(result, Ok(Ok(stream)) => {
@@ -1821,6 +2014,7 @@ mod tests {
                     channel: create_channel("2"),
                     user: create_user(2.into()),
                     stream_id: None,
+                    tuner: None,
                 })
                 .await;
             assert_matches!(result, Ok(Ok(stream)) => {
@@ -1860,6 +2054,7 @@ mod tests {
                     channel: channel_gr!("excluded", "channel"),
                     user: create_user(0.into()),
                     stream_id: None,
+                    tuner: None,
                 })
                 .await;
             assert_matches!(result, Ok(Err(Error::TunerUnavailable)));
@@ -1869,6 +2064,7 @@ mod tests {
                     channel: channel_gr!("channel", "excluded"),
                     user: create_user(0.into()),
                     stream_id: None,
+                    tuner: None,
                 })
                 .await;
             assert_matches!(result, Ok(Err(Error::TunerUnavailable)));
@@ -1878,6 +2074,7 @@ mod tests {
                     channel: channel_gr!("channel", "channel"),
                     user: create_user(0.into()),
                     stream_id: None,
+                    tuner: None,
                 })
                 .await;
             assert_matches!(result, Ok(Ok(_)));
@@ -1920,6 +2117,7 @@ mod tests {
                     channel: create_channel("0"),
                     user: create_user(0.into()),
                     stream_id: None,
+                    tuner: None,
                 })
                 .await;
             assert_matches!(result, Ok(Ok(stream)) => {
@@ -1959,6 +2157,7 @@ mod tests {
                     channel: create_channel("0"),
                     user: create_user(0.into()),
                     stream_id: None,
+                    tuner: None,
                 })
                 .await;
             assert_matches!(result, Ok(Ok(stream)) => {
@@ -2005,6 +2204,7 @@ mod tests {
                     channel: create_channel("0"),
                     user: create_user(0.into()),
                     stream_id: None,
+                    tuner: None,
                 })
                 .await;
             assert_matches!(result, Ok(Ok(stream)) => {
@@ -2047,6 +2247,7 @@ mod tests {
                     channel: create_channel("0"),
                     user: create_user(0.into()),
                     stream_id: None,
+                    tuner: None,
                 })
                 .await;
             assert_matches!(result, Ok(Err(Error::TunerUnavailable)));
@@ -2093,6 +2294,7 @@ mod tests {
                     channel: create_channel("1"),
                     user: create_user(1.into()),
                     stream_id: None,
+                    tuner: None,
                 })
                 .await;
             assert_matches!(result, Ok(Ok(stream)) => {
@@ -2106,6 +2308,7 @@ mod tests {
                     channel: create_channel("0"),
                     user: create_user(0.into()),
                     stream_id: None,
+                    tuner: None,
                 })
                 .await;
             assert_matches!(result, Ok(Ok(stream)) => {
@@ -2160,6 +2363,7 @@ mod tests {
                         priority: 0.into(),
                     },
                     stream_id: None,
+                    tuner: None,
                 })
                 .await;
             assert_matches!(result, Ok(Err(Error::TunerUnavailable)));
@@ -2201,6 +2405,7 @@ mod tests {
                     channel: create_channel("0"),
                     user: create_user(0.into()),
                     stream_id: None,
+                    tuner: None,
                 })
                 .await;
             assert_matches!(result, Ok(Ok(stream)) => {
@@ -2239,6 +2444,7 @@ mod tests {
                     channel: create_channel("0"),
                     user: create_user(0.into()),
                     stream_id: None,
+                    tuner: None,
                 })
                 .await;
             let stream1 = assert_matches!(result, Ok(Ok(stream)) => {
@@ -2252,6 +2458,7 @@ mod tests {
                     channel: create_channel("0"),
                     user: create_user(1.into()),
                     stream_id: None,
+                    tuner: None,
                 })
                 .await;
             assert_matches!(result, Ok(Ok(stream)) => {
@@ -2351,6 +2558,7 @@ mod tests {
                     channel: create_channel("0"),
                     user: create_user(0.into()),
                     stream_id: None,
+                    tuner: None,
                 })
                 .await;
             assert_matches!(result, Ok(Ok(stream)) => {
@@ -2395,6 +2603,7 @@ mod tests {
                     channel: create_channel("0"),
                     user: create_user(0.into()),
                     stream_id: None,
+                    tuner: None,
                 })
                 .await;
             assert_matches!(result, Ok(Ok(stream)) => {
@@ -2440,10 +2649,331 @@ mod tests {
                     channel: create_channel("0"),
                     user: create_user(0.into()),
                     stream_id: None,
+                    tuner: None,
                 })
                 .await;
             assert_matches!(result, Ok(Ok(stream)) => {
                 assert_eq!(stream.id().session_id.tuner_index, 0);
+            });
+        }
+        system.shutdown().await;
+    }
+
+    #[test(tokio::test)]
+    async fn test_pinned_tuner() {
+        let system = System::new();
+        {
+            // The pinned tuner is used even though it is not listed in the
+            // routes defined for the channel.
+            let config: Arc<Config> = Arc::new(
+                serde_norway::from_str(
+                    r#"
+                channels:
+                  - name: test
+                    type: GR
+                    channel: 0
+                    routes:
+                      - tuner: route
+                tuners:
+                  - name: route
+                    types: [GR]
+                    command: "sleep 3"
+                  - name: pinned
+                    types: [GR]
+                    command: "sleep 3"
+                "#,
+                )
+                .unwrap(),
+            );
+
+            let manager = system.spawn_actor(TunerManager::new(config)).await;
+
+            let result = manager
+                .call(StartStreaming {
+                    channel: create_channel("0"),
+                    user: create_user(0.into()),
+                    stream_id: None,
+                    tuner: Some("pinned".to_string()),
+                })
+                .await;
+            assert_matches!(result, Ok(Ok(stream)) => {
+                assert_eq!(stream.id().session_id.tuner_index, 1);
+            });
+        }
+        system.shutdown().await;
+    }
+
+    #[test(tokio::test)]
+    async fn test_pinned_tuner_unknown() {
+        let system = System::new();
+        {
+            let config: Arc<Config> = Arc::new(
+                serde_norway::from_str(
+                    r#"
+                tuners:
+                  - name: pinned
+                    types: [GR]
+                    command: "sleep 3"
+                "#,
+                )
+                .unwrap(),
+            );
+
+            let manager = system.spawn_actor(TunerManager::new(config)).await;
+
+            let result = manager
+                .call(StartStreaming {
+                    channel: create_channel("0"),
+                    user: create_user(0.into()),
+                    stream_id: None,
+                    tuner: Some("no-such-tuner".to_string()),
+                })
+                .await;
+            assert_matches!(result, Ok(Err(Error::InvalidRequest(msg))) => {
+                assert!(msg.contains("no-such-tuner"));
+                assert!(msg.contains("X-Mirakc-Tuner"));
+            });
+        }
+        system.shutdown().await;
+    }
+
+    #[test(tokio::test)]
+    async fn test_pinned_tuner_busy_does_not_fallback() {
+        let system = System::new();
+        {
+            let config: Arc<Config> = Arc::new(
+                serde_norway::from_str(
+                    r#"
+                tuners:
+                  - name: gr1
+                    types: [GR]
+                    command: "sleep 3"
+                  - name: gr2
+                    types: [GR]
+                    command: "sleep 3"
+                "#,
+                )
+                .unwrap(),
+            );
+
+            let manager = system.spawn_actor(TunerManager::new(config)).await;
+
+            // Occupy the pinned tuner.
+            let result = manager
+                .call(StartStreaming {
+                    channel: create_channel("0"),
+                    user: create_user(1.into()),
+                    stream_id: None,
+                    tuner: Some("gr1".to_string()),
+                })
+                .await;
+            let _stream = assert_matches!(result, Ok(Ok(stream)) => {
+                assert_eq!(stream.id().session_id.tuner_index, 0);
+                stream
+            });
+
+            // A lower-priority user cannot grab the pinned tuner and must not
+            // fall back to the other available tuner.
+            let result = manager
+                .call(StartStreaming {
+                    channel: create_channel("1"),
+                    user: create_user(0.into()),
+                    stream_id: None,
+                    tuner: Some("gr1".to_string()),
+                })
+                .await;
+            assert_matches!(result, Ok(Err(Error::TunerUnavailable)));
+
+            // The other tuner is still free.
+            let result = manager
+                .call(StartStreaming {
+                    channel: create_channel("1"),
+                    user: create_user(0.into()),
+                    stream_id: None,
+                    tuner: None,
+                })
+                .await;
+            assert_matches!(result, Ok(Ok(stream)) => {
+                assert_eq!(stream.id().session_id.tuner_index, 1);
+            });
+        }
+        system.shutdown().await;
+    }
+
+    #[test(tokio::test)]
+    async fn test_pinned_tuner_excluded() {
+        let system = System::new();
+        {
+            let config: Arc<Config> = Arc::new(
+                serde_norway::from_str(
+                    r#"
+                tuners:
+                  - name: excluded
+                    types: [GR]
+                    command: "sleep 3"
+                    excluded-channels:
+                      - params:
+                          channel-type: GR
+                          channel: '0'
+                  - name: working
+                    types: [GR]
+                    command: "sleep 3"
+                "#,
+                )
+                .unwrap(),
+            );
+
+            let manager = system.spawn_actor(TunerManager::new(config)).await;
+
+            let result = manager
+                .call(StartStreaming {
+                    channel: create_channel("0"),
+                    user: create_user(0.into()),
+                    stream_id: None,
+                    tuner: Some("excluded".to_string()),
+                })
+                .await;
+            assert_matches!(result, Ok(Err(Error::TunerUnavailable)));
+        }
+        system.shutdown().await;
+    }
+
+    #[test(tokio::test)]
+    async fn test_pinned_tuner_activation_failure_does_not_fallback() {
+        let system = System::new();
+        {
+            // The pinned tuner exits immediately.  Neither the next route nor
+            // any other tuner must be used.
+            let config: Arc<Config> = Arc::new(
+                serde_norway::from_str(
+                    r#"
+                channels:
+                  - name: test
+                    type: GR
+                    channel: 0
+                    routes:
+                      - tuner: broken
+                      - tuner: working
+                tuners:
+                  - name: broken
+                    types: [GR]
+                    command: "true"
+                  - name: working
+                    types: [GR]
+                    command: "sleep 3"
+                "#,
+                )
+                .unwrap(),
+            );
+
+            let manager = system.spawn_actor(TunerManager::new(config)).await;
+
+            let result = manager
+                .call(StartStreaming {
+                    channel: create_channel("0"),
+                    user: create_user(0.into()),
+                    stream_id: None,
+                    tuner: Some("broken".to_string()),
+                })
+                .await;
+            assert_matches!(result, Ok(Err(Error::TunerUnavailable)));
+        }
+        system.shutdown().await;
+    }
+
+    #[test(tokio::test)]
+    async fn test_pinned_tuner_reuse() {
+        let system = System::new();
+        {
+            let config: Arc<Config> = Arc::new(
+                serde_norway::from_str(
+                    r#"
+                tuners:
+                  - name: pinned
+                    types: [GR]
+                    command: "sleep 3"
+                "#,
+                )
+                .unwrap(),
+            );
+
+            let manager = system.spawn_actor(TunerManager::new(config)).await;
+
+            let result = manager
+                .call(StartStreaming {
+                    channel: create_channel("0"),
+                    user: create_user(0.into()),
+                    stream_id: None,
+                    tuner: Some("pinned".to_string()),
+                })
+                .await;
+            let stream1 = assert_matches!(result, Ok(Ok(stream)) => {
+                assert_eq!(stream.id().session_id.tuner_index, 0);
+                stream
+            });
+
+            let result = manager
+                .call(StartStreaming {
+                    channel: create_channel("0"),
+                    user: create_user(1.into()),
+                    stream_id: None,
+                    tuner: Some("pinned".to_string()),
+                })
+                .await;
+            assert_matches!(result, Ok(Ok(stream)) => {
+                assert_eq!(stream.id().session_id, stream1.id().session_id);
+                assert_ne!(stream.id(), stream1.id());
+            });
+        }
+        system.shutdown().await;
+    }
+
+    #[test(tokio::test)]
+    async fn test_pinned_tuner_grab() {
+        let system = System::new();
+        {
+            let config: Arc<Config> = Arc::new(
+                serde_norway::from_str(
+                    r#"
+                tuners:
+                  - name: gr1
+                    types: [GR]
+                    command: "sleep 3"
+                  - name: gr2
+                    types: [GR]
+                    command: "sleep 3"
+                "#,
+                )
+                .unwrap(),
+            );
+
+            let manager = system.spawn_actor(TunerManager::new(config)).await;
+
+            let result = manager
+                .call(StartStreaming {
+                    channel: create_channel("0"),
+                    user: create_user(0.into()),
+                    stream_id: None,
+                    tuner: None,
+                })
+                .await;
+            let stream1 = assert_matches!(result, Ok(Ok(stream)) => {
+                assert_eq!(stream.id().session_id.tuner_index, 0);
+                stream
+            });
+
+            // A higher-priority user can grab the pinned tuner.
+            let result = manager
+                .call(StartStreaming {
+                    channel: create_channel("1"),
+                    user: create_user(2.into()),
+                    stream_id: None,
+                    tuner: Some("gr1".to_string()),
+                })
+                .await;
+            assert_matches!(result, Ok(Ok(stream)) => {
+                assert_eq!(stream.id().session_id.tuner_index, 0);
+                assert_ne!(stream.id().session_id, stream1.id().session_id);
             });
         }
         system.shutdown().await;
@@ -2689,6 +3219,7 @@ mod tests {
                     channel: create_channel("0"),
                     user: create_user(0.into()),
                     stream_id: None,
+                    tuner: None,
                 })
                 .await;
             let mut stream = assert_matches!(result, Ok(Ok(stream)) => {

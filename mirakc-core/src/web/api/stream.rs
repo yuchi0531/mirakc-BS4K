@@ -44,7 +44,9 @@ pub(in crate::web::api) fn compute_content_range(
             let mut range = None;
             for (start, end) in ranges.satisfiable_ranges(content_length) {
                 if range.is_some() {
-                    return Err(Error::InvalidRequest("Multiple ranges are not supported"));
+                    return Err(Error::InvalidRequest(
+                        "Multiple ranges are not supported".to_string(),
+                    ));
                 }
                 let first = match start {
                     Bound::Included(pos) => pos,

@@ -223,6 +223,7 @@ where
                 channel: service.channel.clone(),
                 user,
                 stream_id: self.config.stream_id,
+                tuner: None,
             })
             .await??;
 

@@ -142,6 +142,22 @@ mirakc and Mirakurun:
 * Can grab a tuner which is used by other users regardless of their priorities
   if the priority is 128
 
+## Pinning a tuner with the `X-Mirakc-Tuner` header
+
+[GET /api/channels/{channel_type}/{channel}/stream] supports the
+`X-Mirakc-Tuner` header.  The value must be the name of a tuner defined in
+`config.tuners`.
+
+When the header is specified, mirakc uses the specified tuner **without any
+fallback**.  The `routes` defined for the channel are ignored, and no other
+tuner is tried even when the specified tuner is disabled, excluded for the
+channel, busy or fails to start.  In such a case, the request fails with an
+error.
+
+The header is not supported by other streaming endpoints such as
+[GET /api/services/{id}/stream].  When the header is not specified, mirakc
+chooses a tuner as before.
+
 ## Incompatibility of the `decode` query parameter
 
 Before `1.0.30`, mirakc does **NOT** decode the stream when no `decode` query

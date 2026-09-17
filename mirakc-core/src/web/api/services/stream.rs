@@ -125,6 +125,7 @@ where
             channel: channel.clone(),
             user: user.clone(),
             stream_id: None,
+            tuner: None,
         })
         .await??;
 

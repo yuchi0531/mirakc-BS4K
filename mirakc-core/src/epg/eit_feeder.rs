@@ -220,6 +220,7 @@ where
                 channel: channel.clone(),
                 user,
                 stream_id: None,
+                tuner: None,
             })
             .await??;
 

@@ -128,6 +128,7 @@ where
 
 const X_MIRAKURUN_TUNER_USER_ID: &str = "x-mirakurun-tuner-user-id";
 const X_MIRAKURUN_PRIORITY: &str = "x-mirakurun-priority";
+const X_MIRAKC_TUNER: &str = "x-mirakc-tuner";
 
 // endpoints
 

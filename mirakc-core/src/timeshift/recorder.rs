@@ -359,6 +359,7 @@ where
                 channel: channel.clone(),
                 user,
                 stream_id: None,
+                tuner: None,
             })
             .await??;
 
@@ -433,7 +434,8 @@ pub(crate) fn ensure_timeshift_supported(channel_type: ChannelType) -> Result<()
     if is_tlv_passthrough(channel_type) {
         return Err(Error::InvalidRequest(
             "BS4K timeshift recording is unsupported (TLV has no PAT for seeking): \
-             timeshift requires MPEG-TS",
+             timeshift requires MPEG-TS"
+                .to_string(),
         ));
     }
     Ok(())

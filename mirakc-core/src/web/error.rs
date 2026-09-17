@@ -8,7 +8,7 @@ use crate::error::Error;
 #[derive(Serialize)]
 struct ErrorBody {
     code: u16,
-    reason: Option<&'static str>,
+    reason: Option<String>,
     errors: Vec<u8>,
 }
 
@@ -29,7 +29,7 @@ macro_rules! error_response {
             $status_code,
             Json(ErrorBody {
                 code: $status_code.as_u16(),
-                reason: Some($reason),
+                reason: Some($reason.to_string()),
                 errors: vec![],
             }),
         )
