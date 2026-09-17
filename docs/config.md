@@ -24,6 +24,7 @@ suitable for your environment.
 | [channels\[\].services]                  | `[]`                              |
 | [channels\[\].excluded-services]         | `[]`                              |
 | [channels\[\].disabled]                  | `false`                           |
+| [channels\[\].routes]                    | `[]`                              |
 | [tuners\[\].name]                        |                                   |
 | [tuners\[\].types]                       |                                   |
 | [tuners\[\].command]                     |                                   |
@@ -88,6 +89,7 @@ suitable for your environment.
 [channels\[\].services]: #channels
 [channels\[\].excluded-services]: #channels
 [channels\[\].disabled]: #channels
+[channels\[\].routes]: #routes
 [tuners\[\].name]: #tuners
 [tuners\[\].types]: #tuners
 [tuners\[\].command]: #tuners
@@ -441,6 +443,9 @@ Definitions of channels.  At least, one channel must be defined.
   * Applied after processing the `services` property
 * disabled (optional)
   * Disable the channel definition
+* routes (optional)
+  * A list of routes tried in order when a tuner is activated for the channel
+  * See [routes](#routes) for details
 
 ```yaml
 # YAML
@@ -700,6 +705,102 @@ type = "BS"
 channel = "BS15_0"
 extra-args = "args"
 ```
+
+### routes
+
+`routes` is an optional list of tuner routes for the channel.  The routes are
+tried in the defined order when mirakc activates a tuner for the channel.  This
+is useful when the same TS is available from multiple paths, for example from a
+CATV tuner and a local tuner, and for falling back to another path when one of
+them fails to start.
+
+A channel without `routes` keeps the legacy behavior: mirakc selects a tuner
+from all defined tuners.
+
+* tuner
+  * The `name` of a tuner defined in the `tuners`
+* channel (optional)
+  * A channel parameter used in the tuner command instead of the `channel` of
+    the channel for this route only
+* extra-args (optional)
+  * Extra arguments used in the tuner command instead of the `extra-args` of
+    the channel for this route only
+
+```yaml
+# YAML
+channels:
+  - name: AT-X
+    type: CS
+    channel: AT-X
+    routes:
+      # First route: via CATV.
+      - tuner: mirakurun-catv
+      # Second route: a local tuner.
+      - tuner: ptx-s110
+        channel: '13'           # Overrides the channel for this route only.
+        extra-args: '--lnb 15'  # Overrides the extra-args for this route only.
+```
+
+```toml
+# TOML
+[[channels]]
+name = "AT-X"
+type = "CS"
+channel = "AT-X"
+
+# First route: via CATV.
+[[channels.routes]]
+tuner = "mirakurun-catv"
+
+# Second route: a local tuner.
+[[channels.routes]]
+tuner = "ptx-s110"
+channel = "13"
+extra-args = "--lnb 15"
+```
+
+For each route, only the tuner named in the route is considered.  It is used
+if any of the following applies, in this order:
+
+1. It is reserved for the user.
+2. It is active for the effective channel and can be reused.
+3. It is available.
+4. It can be grabbed from lower-priority users.
+
+If the tuner cannot be used, the next route is tried.
+
+Fallback to the next route happens only when starting the tuner command fails:
+
+* The tuner command cannot be rendered or spawned.
+* The tuner command exits before outputting its first data.
+
+mirakc waits up to 1000 ms for the first data.  The timeout can be changed with
+the `MIRAKC_TUNER_STARTUP_PROBE_TIMEOUT_MS` environment variable.  A timeout is
+**not** a failure: a tuner that has no data yet (e.g. no signal) is treated as
+successfully started and no fallback happens.  Stopping or losing data after
+the stream has started does not trigger a fallback either.
+
+Notes:
+
+* If all routes fail, the request fails with `TunerUnavailable` as before.
+* A `tuner` name that is not defined in the `tuners` is rejected at startup.
+* A route whose tuner is disabled or excluded for the (effective) channel is
+  skipped with a warning.
+* Only tuners listed in `routes` are considered.  A tuner reserved for another
+  purpose (e.g. a local on-air program tracker or a timeshift recorder) is not
+  used unless it is listed in `routes`.
+* `routes` is resolved every time mirakc activates a tuner for the channel,
+  including tuner activations for EPG jobs and recordings.  The per-route
+  `channel` and `extra-args` are applied to the tuner command, and the
+  effective channel is also used for the tuner-filter.  Channel definitions
+  returned by the Web API and stored in EPG data and recording metadata keep
+  the original `channel` and `extra-args`.
+* Services are identified by NID and SID.  If a passthrough retransmission
+  provides the same service, mirakc treats it as the same service regardless of
+  the route, so EPG data and recordings are integrated naturally.
+* As with `extra-args`, channel definitions having the same `type` and
+  `channel` should have the same `routes`.  The first definition is used if
+  they differ.
 
 ## tuners
 
