@@ -5,6 +5,7 @@
 - mirakc-arib-tlvによりbs4kのmmt/tlv対応
   - [mirakc-arib-tlv](https://github.com/yuchi0531/mirakc-arib-tlv)を利用し、デコード済みTLVをパススルー配信(復号は外部のデコード済みTLVサーバ前提)
   - BS4K向けEPGジョブ(`command-bs4k`: `scan-services-tlv`/`collect-mh-eits`)に対応。このリポジトリでビルドしたDockerイメージ(debian/alpine)にも同梱
+  - tunersに`tlv-decoder`項目を追加。dantto4k等をtunerのパイプラインに挿入することでTLVをTSに変換し、BS4Kをchannel/serviceのTSとして配信できる(未指定時は従来通りTLVパススルー。program-level配信/録画は非対応のまま)
 - channels.ymlにroutesフィールドを追加しcatvなど別経路で同じ放送波が受信できる場合に対応(Inspired by [Mahiron](https://github.com/rokoucha/Mahiron))
   - 起動失敗時のみ次の経路へフォールバック
 - `X-Mirakc-Tuner`ヘッダでクライアント指定のチューナーに固定(channel streamのみ、routesを無視して厳密固定、未知名は400)

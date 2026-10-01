@@ -672,6 +672,14 @@ pub struct TunerConfig {
     pub disabled: bool,
     #[serde(default)]
     pub decoded: bool,
+    /// A command that converts the tuner output into MPEG-TS.
+    ///
+    /// BS4K tuners deliver MMT/TLV by default.  This command is inserted into
+    /// the tuner pipeline right after the tuner command, so that the rest of
+    /// the pipeline and the clients see ordinary MPEG-TS.  An empty value
+    /// (the default) keeps the raw TLV passthrough.
+    #[serde(default)]
+    pub tlv_decoder: String,
     #[serde(default)]
     #[serde(with = "serde_norway::with::singleton_map_recursive")]
     pub excluded_channels: Vec<ExcludedChannelConfig>,
@@ -702,6 +710,12 @@ impl TunerConfig {
             is_valid_command(&self.command),
             "config.tuners[{index}].command: must be a valid command"
         );
+        if !self.tlv_decoder.is_empty() {
+            validate!(
+                is_valid_command(&self.tlv_decoder),
+                "config.tuners[{index}].tlv-decoder: must be a valid command"
+            );
+        }
         for (i, excluded) in self.excluded_channels.iter().enumerate() {
             excluded.validate(index, i);
         }
@@ -717,6 +731,7 @@ impl Default for TunerConfig {
             time_limit: Self::default_time_limit(),
             disabled: false,
             decoded: false,
+            tlv_decoder: "".to_string(),
             excluded_channels: vec![],
         }
     }
@@ -3941,6 +3956,99 @@ mod tests {
         )
         .unwrap();
         use_stub_commands(&mut config);
+        config.validate(true);
+    }
+
+    #[test]
+    fn test_config_tlv_decoder_defaults_to_empty() {
+        let config = serde_norway::from_str::<Config>(
+            r#"
+            channels:
+              - name: gr
+                type: GR
+                channel: '0'
+            tuners:
+              - name: GR0
+                types: [GR]
+                command: 'true'
+            resource:
+              strings-yaml: /bin/sh
+        "#,
+        )
+        .unwrap();
+        assert_eq!(config.tuners[0].tlv_decoder, "");
+    }
+
+    #[test]
+    fn test_config_tlv_decoder_is_parsed() {
+        let config = serde_norway::from_str::<Config>(
+            r#"
+            channels:
+              - name: bs4k
+                type: BS4K
+                channel: '45168'
+            tuners:
+              - name: BS4K0
+                types: [BS4K]
+                command: 'true'
+                tlv-decoder: 'dantto4k --frontend-descrambled --no-progress - -'
+            resource:
+              strings-yaml: /bin/sh
+        "#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.tuners[0].tlv_decoder,
+            "dantto4k --frontend-descrambled --no-progress - -"
+        );
+    }
+
+    #[test]
+    fn test_config_validate_tlv_decoder_available() {
+        let mut config = serde_norway::from_str::<Config>(
+            r#"
+            channels:
+              - name: bs4k
+                type: BS4K
+                channel: '45168'
+            tuners:
+              - name: BS4K0
+                types: [BS4K]
+                command: 'true'
+                tlv-decoder: 'true'
+            resource:
+              strings-yaml: /bin/sh
+        "#,
+        )
+        .unwrap();
+        use_stub_commands(&mut config);
+        config.jobs.scan_services.command_bs4k = "true".to_string();
+        config.jobs.update_schedules.command_bs4k = "true".to_string();
+        config.validate(true);
+    }
+
+    #[test]
+    #[should_panic(expected = "config.tuners[0].tlv-decoder: must be a valid command")]
+    fn test_config_validate_tlv_decoder_not_available() {
+        let mut config = serde_norway::from_str::<Config>(
+            r#"
+            channels:
+              - name: bs4k
+                type: BS4K
+                channel: '45168'
+            tuners:
+              - name: BS4K0
+                types: [BS4K]
+                command: 'true'
+                tlv-decoder: no-such-command
+            resource:
+              strings-yaml: /bin/sh
+        "#,
+        )
+        .unwrap();
+        use_stub_commands(&mut config);
+        config.jobs.scan_services.command_bs4k = "true".to_string();
+        config.jobs.update_schedules.command_bs4k = "true".to_string();
         config.validate(true);
     }
 

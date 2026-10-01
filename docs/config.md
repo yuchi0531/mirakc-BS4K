@@ -31,6 +31,7 @@ suitable for your environment.
 | [tuners\[\].time-limit]                  | `30000` (30s)                     |
 | [tuners\[\].disabled]                    | `false`                           |
 | [tuners\[\].decoded]                     | `false`                           |
+| [tuners\[\].tlv-decoder]                 | `''`                              |
 | [tuners\[\].excluded-channels]           | `[]`                              |
 | [filters.tuner-filter.command]           | `''`                              |
 | [filters.service-filter.command]         | `mirakc-arib filter-service --sid={{{sid}}}` |
@@ -96,6 +97,7 @@ suitable for your environment.
 [tuners\[\].time-limit]: #tuners
 [tuners\[\].disabled]: #tuners
 [tuners\[\].decoded]: #tuners
+[tuners\[\].tlv-decoder]: #tuners
 [tuners\[\].excluded-channels]: #tuners
 [filters.tuner-filter.command]: #filterstuner-filter
 [filters.service-filter.command]: #filtersservice-filter
@@ -813,6 +815,8 @@ Definitions of tuners.  At least, one tuner must be defined.
 * command
   * A Mustache template string of a command to open the tuner
   * The command must output TS packets to `stdout`
+  * For `BS4K` tuners the command outputs MMT/TLV instead, unless a
+    `tlv-decoder` is configured
 * time-limit (optional)
   * A time limit in milliseconds
   * Stop streaming if no TS packet comes from the tuner for the time limit
@@ -820,6 +824,17 @@ Definitions of tuners.  At least, one tuner must be defined.
   * Disable the tuner
 * decoded (optional)
   * PES packets are decoded by the tuner command
+* tlv-decoder (optional)
+  * A command that converts the MMT/TLV output of a `BS4K` tuner into MPEG-TS
+  * It is run right after the tuner command, so the rest of the pipeline and
+    the clients see ordinary MPEG-TS
+  * The command must read from `stdin` and write TS packets to `stdout`
+  * When set, the TS-oriented builtin filters are applied to this tuner
+    instead of being skipped
+  * If empty (the default), the raw TLV is passed through as-is, like
+    MMirakurun
+  * Note that program-level streaming and recording remain unsupported for
+    `BS4K`, because clock synchronization is disabled for `BS4K`
 * excluded-channels (optional)
   * A list of excluded channels
 
@@ -875,6 +890,15 @@ tuners:
       - params:
           channel-type: GR
           channel: exclude-channel
+
+  # A BS4K tuner delivering MMT/TLV can be converted into MPEG-TS by a
+  # `tlv-decoder`.  Here the input is assumed to be already descrambled by the
+  # frontend, so dantto4k does not need a smart card.
+  - name: BS4K0
+    types: [BS4K]
+    command: >-
+      curl -sG http://bs4k:40772/api/channels/{{{channel_type}}}/{{{channel}}}/stream
+    tlv-decoder: dantto4k --frontend-descrambled --no-progress - -
 ```
 
 ```toml

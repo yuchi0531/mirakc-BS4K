@@ -1,7 +1,6 @@
 use super::*;
 
 use crate::epg::EpgChannel;
-use crate::filter::is_tlv_passthrough;
 use crate::web::api::stream::StreamingHeaderParams;
 use crate::web::api::stream::do_head_stream;
 use crate::web::api::stream::streaming;
@@ -141,6 +140,7 @@ where
         channel,
         sid,
         stream.is_decoded(),
+        stream.is_tlv_decoded(),
     )?;
     debug_assert!(!seekable);
 
@@ -171,6 +171,7 @@ pub(in crate::web::api) async fn do_head_service_stream(
         channel,
         sid,
         false, // This is a dummy but works properly.
+        false, // ditto; HEAD does not open a tuner.
     )?;
     debug_assert!(!seekable);
 
@@ -192,6 +193,7 @@ fn build_filters(
     channel: &EpgChannel,
     sid: Sid,
     decoded: bool,
+    tlv_decoded: bool,
 ) -> Result<(Vec<String>, String, bool), Error> {
     let data = mustache::MapBuilder::new()
         .insert_str("channel_name", &channel.name)
@@ -203,12 +205,12 @@ fn build_filters(
 
     let mut builder = FilterPipelineBuilder::new(data, false); // not seekable
     builder.add_pre_filters(&config.pre_filters, &filter_setting.pre_filters)?;
-    // BS4K delivers decoded TLV passthrough (1 TLV = 1 service) from the
-    // tuner without modification, like MMirakurun.  mirakc-arib
-    // service/decode filters are TS-only and must not touch the stream, so
-    // skip both even when `decode=true`.  Content-Type stays `video/MP2T`
-    // for Mirakurun-client compatibility.
-    if !is_tlv_passthrough(channel.channel_type) {
+    // BS4K delivers MMT/TLV from the tuner (1 TLV = 1 service).  Unless the tuner
+    // converted it into MPEG-TS with a `tlv-decoder` command, the stream is
+    // still TLV, so the TS-only mirakc-arib service/decode filters must not
+    // touch it.  Content-Type stays `video/MP2T` for Mirakurun-client
+    // compatibility either way.
+    if !tlv_decoded {
         if !decoded && filter_setting.decode {
             builder.add_decode_filter(&config.filters.decode_filter)?;
         }
