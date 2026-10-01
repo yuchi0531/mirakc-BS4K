@@ -83,6 +83,7 @@ struct TunerSubscription {
     broadcaster: Address<Broadcaster>,
     max_stuck_time: std::time::Duration,
     decoded: bool,
+    tlv_decoded: bool,
 }
 
 impl TunerSubscription {
@@ -96,6 +97,7 @@ impl TunerSubscription {
             broadcaster,
             max_stuck_time,
             decoded: false,
+            tlv_decoded: false,
         }
     }
 }
@@ -483,6 +485,11 @@ impl Handler<StartStreaming> for TunerManager {
                 } else {
                     stream
                 };
+                let stream = if subscription.tlv_decoded {
+                    stream.tlv_decoded()
+                } else {
+                    stream
+                };
                 Ok(stream)
             }
             Err(err) => {
@@ -538,6 +545,7 @@ struct Tuner {
     command: String,
     time_limit: u64,
     decoded: bool,
+    tlv_decoder: String,
     excluded_channels: Vec<ExcludedChannelConfig>,
     reserved_for: Option<TunerUserInfo>,
     restriction: Restriction,
@@ -559,6 +567,7 @@ impl Tuner {
             command: config.command.clone(),
             time_limit: config.time_limit,
             decoded: config.decoded,
+            tlv_decoder: config.tlv_decoder.clone(),
             excluded_channels: config.excluded_channels.clone(),
             reserved_for: None,
             restriction: Restriction::None,
@@ -658,10 +667,28 @@ impl Tuner {
             }
         };
         self.activity
-            .activate(self.index, channel, command, filters, self.time_limit, ctx)
+            .activate(
+                self.index,
+                channel,
+                TunerPipelineCommands {
+                    command,
+                    tlv_decoder: self.tlv_decoder_command(),
+                },
+                filters,
+                self.time_limit,
+                ctx,
+            )
             .await
     }
 
+    /// The `tlv-decoder` command to insert into the pipeline, if configured.
+    fn tlv_decoder_command(&self) -> Option<String> {
+        if self.tlv_decoder.is_empty() {
+            None
+        } else {
+            Some(self.tlv_decoder.clone())
+        }
+    }
     fn deactivate(&mut self) {
         self.activity.deactivate();
     }
@@ -669,6 +696,7 @@ impl Tuner {
     fn subscribe(&mut self, user: &TunerUser) -> TunerSubscription {
         let mut subscription = self.activity.subscribe(user);
         subscription.decoded = self.decoded;
+        subscription.tlv_decoded = !self.tlv_decoder.is_empty();
         subscription
     }
 
@@ -737,12 +765,23 @@ enum TunerActivity {
     Active(Box<TunerSession>),
 }
 
+/// The commands that make up the head of a tuner pipeline.
+///
+/// `tlv_decoder` is inserted right after `command` so that the rest of the
+/// pipeline and the clients see MPEG-TS even when the tuner emits MMT/TLV.
+/// The two are kept together to avoid threading a long list of related
+/// parameters through the activation chain.
+struct TunerPipelineCommands {
+    command: String,
+    tlv_decoder: Option<String>,
+}
+
 impl TunerActivity {
     async fn activate<C>(
         &mut self,
         tuner_index: usize,
         channel: &EpgChannel,
-        command: String,
+        commands: TunerPipelineCommands,
         filters: Vec<String>,
         time_limit: u64,
         ctx: &C,
@@ -753,7 +792,119 @@ impl TunerActivity {
         match self {
             Self::Inactive => {
                 let session =
-                    TunerSession::new(tuner_index, channel, command, filters, time_limit, ctx)
+                    TunerSession::new(tuner_index, channel, commands, filters, time_limit, ctx)
+                        .await?;
+                *self = Self::Active(Box::new(session));
+                Ok(())
+            }
+            Self::Active(_) => panic!("Must be deactivated before activating"),
+        }
+    }
+
+    fn deactivate(&mut self) {
+        self.activity.deactivate();
+    }
+
+    fn subscribe(&mut self, user: &TunerUser) -> TunerSubscription {
+        let mut subscription = self.activity.subscribe(user);
+        subscription.decoded = self.decoded;
+        subscription.tlv_decoded = !self.tlv_decoder.is_empty();
+        subscription
+    }
+
+    async fn stop_streaming(
+        &mut self,
+        id: TunerSubscriptionId,
+    ) -> Result<Option<TunerUser>, Error> {
+        self.activity.unsubscript(id).await
+    }
+
+    fn get_mirakurun_model(&self) -> MirakurunTuner {
+        let (command, pid, users) = self.activity.get_mirakurun_models();
+
+        MirakurunTuner {
+            index: self.index,
+            name: self.name.clone(),
+            channel_types: self.channel_types.clone(),
+            command,
+            pid,
+            users,
+            is_available: true,
+            is_remote: false,
+            is_free: self.is_available(),
+            is_using: !self.is_available(),
+            is_fault: false,
+        }
+    }
+
+    fn make_command(&self, channel: &EpgChannel) -> Result<String, Error> {
+        let template = mustache::compile_str(&self.command)?;
+        let data = mustache::MapBuilder::new()
+            .insert("channel_type", &channel.channel_type)?
+            .insert_str("channel", &channel.channel)
+            .insert_str("extra_args", &channel.extra_args)
+            .insert_str("duration", "-")
+            .build();
+        Ok(template.render_data_to_string(&data)?)
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct TunerPriority {
+    highest_user_priority: TunerUserPriority,
+    num_users: usize,
+}
+
+impl Ord for TunerPriority {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        if self.highest_user_priority != other.highest_user_priority {
+            return self.highest_user_priority.cmp(&other.highest_user_priority);
+        }
+        self.num_users.cmp(&other.num_users)
+    }
+}
+
+impl PartialOrd for TunerPriority {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+// activity
+
+enum TunerActivity {
+    Inactive,
+    Active(Box<TunerSession>),
+}
+
+/// The commands that make up the head of a tuner pipeline.
+///
+/// `tlv_decoder` is inserted right after `command` so that the rest of the
+/// pipeline and the clients see MPEG-TS even when the tuner emits MMT/TLV.
+/// The two are kept together to avoid threading a long list of related
+/// parameters through the activation chain.
+struct TunerPipelineCommands {
+    command: String,
+    tlv_decoder: Option<String>,
+}
+
+impl TunerActivity {
+    async fn activate<C>(
+        &mut self,
+        tuner_index: usize,
+        channel: &EpgChannel,
+        commands: TunerPipelineCommands,
+        filters: Vec<String>,
+        time_limit: u64,
+        ctx: &C,
+    ) -> Result<(), Error>
+    where
+        C: Spawn,
+    {
+        match self {
+            Self::Inactive => {
+                let session =
+                    TunerSession::new(tuner_index, channel, commands, filters, time_limit, ctx)
                         .await?;
                 *self = Self::Active(Box::new(session));
                 Ok(())
@@ -852,7 +1003,7 @@ impl TunerSession {
     async fn new<C>(
         tuner_index: usize,
         channel: &EpgChannel,
-        command: String,
+        commands: TunerPipelineCommands,
         mut filters: Vec<String>,
         time_limit: u64,
         ctx: &C,
@@ -860,10 +1011,35 @@ impl TunerSession {
     where
         C: Spawn,
     {
+        let (id, pipeline, output) =
+            Self::build_pipeline(tuner_index, channel, commands, &mut filters, ctx)?;
+        Self::activate(id, channel, pipeline, output, time_limit, ctx).await
+    }
+
+    fn build_pipeline<C>(
+        tuner_index: usize,
+        channel: &EpgChannel,
+        commands: TunerPipelineCommands,
+        filters: &mut Vec<String>,
+        ctx: &C,
+    ) -> Result<
+        (
+            TunerSessionId,
+            CommandPipeline<TunerSessionId>,
+            CommandPipelineOutput<TunerSessionId>,
+        ),
+        Error,
+    >
+    where
+        C: Spawn,
+    {
         let id = TunerSessionId::new(tuner_index);
-        let mut commands = vec![command];
-        commands.append(&mut filters);
-        let mut pipeline = match spawn_pipeline(commands, id, "tuner", ctx) {
+        let mut pipeline_commands = vec![commands.command];
+        // The tlv-decoder converts MMT/TLV into MPEG-TS right after the tuner
+        // command so that the remaining filters and the clients see TS.
+        pipeline_commands.extend(commands.tlv_decoder);
+        pipeline_commands.append(filters);
+        let mut pipeline = match spawn_pipeline(pipeline_commands, id, "tuner", ctx) {
             Ok(pipeline) => pipeline,
             Err(err) => {
                 tracing::error!(%err, session.id = %id, %channel, "Failed to spawn a tuner pipeline");
@@ -871,8 +1047,23 @@ impl TunerSession {
             }
         };
         let (_, output) = pipeline.take_endpoints();
+        Ok((id, pipeline, output))
+    }
+
+    async fn activate<R, C>(
+        id: TunerSessionId,
+        channel: &EpgChannel,
+        pipeline: CommandPipeline<TunerSessionId>,
+        reader: R,
+        time_limit: u64,
+        ctx: &C,
+    ) -> Result<TunerSession, Error>
+    where
+        R: AsyncRead + Send + Unpin + 'static,
+        C: Spawn,
+    {
         let broadcaster = ctx.spawn_actor(Broadcaster::new(id, time_limit)).await;
-        broadcaster.emit(BindStream(output)).await;
+        broadcaster.emit(BindStream(reader)).await;
         tracing::debug!(session.id = %id, %channel, "Activated");
 
         Ok(TunerSession {
@@ -1726,6 +1917,92 @@ mod tests {
 
             let data = stream.next().await;
             assert_matches!(data, None);
+        }
+        system.shutdown().await;
+    }
+
+    #[test(tokio::test)]
+    async fn test_tlv_decoder_is_inserted_into_pipeline() {
+        let system = System::new();
+
+        {
+            let config: Arc<Config> = Arc::new(
+                serde_norway::from_str(
+                    r#"
+                tuners:
+                  - name: bs4k
+                    types: [BS4K]
+                    command: >-
+                      printf TLV
+                    tlv-decoder: >-
+                      tr a-z A-Z
+                "#,
+                )
+                .unwrap(),
+            );
+
+            let manager = system.spawn_actor(TunerManager::new(config)).await;
+
+            let result = manager
+                .call(StartStreaming {
+                    channel: channel_bs4k!("name", "0xB110"),
+                    user: create_user(0.into()),
+                    stream_id: None,
+                    tuner: None,
+                })
+                .await;
+            let mut stream = assert_matches!(result, Ok(Ok(stream)) => stream);
+
+            // The tlv-decoder runs between the tuner command and the stream, so
+            // the TLV bytes from the tuner arrive upper-cased as TS would be.
+            let data = stream.next().await;
+            assert_matches!(data, Some(Ok(chunk)) => {
+                assert_eq!(chunk.as_ref(), b"TLV");
+            });
+
+            // The stream is marked as converted into MPEG-TS.
+            assert!(stream.is_tlv_decoded());
+        }
+        system.shutdown().await;
+    }
+
+    #[test(tokio::test)]
+    async fn test_no_tlv_decoder_keeps_raw_tlv() {
+        let system = System::new();
+
+        {
+            let config: Arc<Config> = Arc::new(
+                serde_norway::from_str(
+                    r#"
+                tuners:
+                  - name: bs4k
+                    types: [BS4K]
+                    command: >-
+                      printf tlv
+                "#,
+                )
+                .unwrap(),
+            );
+
+            let manager = system.spawn_actor(TunerManager::new(config)).await;
+
+            let result = manager
+                .call(StartStreaming {
+                    channel: channel_bs4k!("name", "0xB110"),
+                    user: create_user(0.into()),
+                    stream_id: None,
+                    tuner: None,
+                })
+                .await;
+            let mut stream = assert_matches!(result, Ok(Ok(stream)) => stream);
+
+            // Without a tlv-decoder the raw TLV passes through unchanged.
+            let data = stream.next().await;
+            assert_matches!(data, Some(Ok(chunk)) => {
+                assert_eq!(chunk.as_ref(), b"tlv");
+            });
+
+            assert!(!stream.is_tlv_decoded());
         }
         system.shutdown().await;
     }

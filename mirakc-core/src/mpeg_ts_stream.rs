@@ -13,6 +13,7 @@ pub struct MpegTsStream<T, S> {
     id: T,
     stream: S,
     decoded: bool,
+    tlv_decoded: bool,
 }
 
 impl<T, S> MpegTsStream<T, S> {
@@ -21,6 +22,7 @@ impl<T, S> MpegTsStream<T, S> {
             id,
             stream,
             decoded: false,
+            tlv_decoded: false,
         }
     }
 
@@ -31,6 +33,17 @@ impl<T, S> MpegTsStream<T, S> {
 
     pub fn is_decoded(&self) -> bool {
         self.decoded
+    }
+
+    /// Marks the stream as converted from MMT/TLV into MPEG-TS by a tuner
+    /// `tlv-decoder` command.
+    pub fn tlv_decoded(mut self) -> Self {
+        self.tlv_decoded = true;
+        self
+    }
+
+    pub fn is_tlv_decoded(&self) -> bool {
+        self.tlv_decoded
     }
 }
 

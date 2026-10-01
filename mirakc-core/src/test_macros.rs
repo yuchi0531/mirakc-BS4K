@@ -103,6 +103,12 @@ macro_rules! channel_gr {
     };
 }
 
+macro_rules! channel_bs4k {
+    ($name:expr, $channel:expr) => {
+        channel!($name, crate::models::ChannelType::BS4K, $channel)
+    };
+}
+
 macro_rules! service {
     ($id:expr, $name:expr, $channel:expr) => {{
         crate::epg::EpgService {
