@@ -551,6 +551,14 @@ pub struct ChannelConfig {
     pub excluded_services: Vec<Sid>,
     #[serde(default)]
     pub disabled: bool,
+    /// TSMF (MPEG-TS Multi Frame) relative TS number for CATV.
+    ///
+    /// When set (1-15), mirakc inserts a `filters.tsmf-filter` command into
+    /// the tuner pipeline so that only the specified relative TS stream is
+    /// extracted from a TSMF multiplexed stream.  This is compatible with the
+    /// `tsmfRelTs` property of Mirakurun.
+    #[serde(default, alias = "tsmfRelTs")]
+    pub tsmf_rel_ts: Option<u8>,
     #[serde(default)]
     pub routes: Vec<ChannelRouteConfig>,
 }
@@ -584,6 +592,12 @@ impl ChannelConfig {
                         tracing::warn!(
                             "Channels having the same `type` and `channel` \
                              should have the same `routes`"
+                        );
+                    }
+                    if ch.tsmf_rel_ts != channel.tsmf_rel_ts {
+                        tracing::warn!(
+                            "Channels having the same `type` and `channel` \
+                             should have the same `tsmf-rel-ts`"
                         );
                     }
                     if ch.services.is_empty() {
@@ -633,6 +647,12 @@ impl ChannelConfig {
                 Self::is_valid_bs4k_channel(&self.channel),
                 "config.channels[{index}].channel: must be a decimal or \
                  0x-prefixed hexadecimal StreamID for BS4K"
+            );
+        }
+        if let Some(tsmf_rel_ts) = self.tsmf_rel_ts {
+            validate!(
+                (1..=15).contains(&tsmf_rel_ts),
+                "config.channels[{index}].tsmf-rel-ts: must be between 1 and 15"
             );
         }
     }
@@ -777,6 +797,8 @@ impl ExcludedChannelConfig {
 pub struct FiltersConfig {
     #[serde(default)]
     pub tuner_filter: FilterConfig,
+    #[serde(default = "FiltersConfig::default_tsmf_filter")]
+    pub tsmf_filter: FilterConfig,
     #[serde(default = "FiltersConfig::default_service_filter")]
     pub service_filter: FilterConfig,
     #[serde(default = "FiltersConfig::default_program_filter")]
@@ -786,6 +808,12 @@ pub struct FiltersConfig {
 }
 
 impl FiltersConfig {
+    fn default_tsmf_filter() -> FilterConfig {
+        FilterConfig {
+            command: "mirakc-arib filter-tsmf --relative-ts={{{tsmf_rel_ts}}}".to_string(),
+        }
+    }
+
     fn default_service_filter() -> FilterConfig {
         FilterConfig {
             command: "mirakc-arib filter-service --sid={{{sid}}}".to_string(),
@@ -819,6 +847,7 @@ impl FiltersConfig {
 
     fn validate(&self) {
         self.tuner_filter.validate("filters", "tuner-filter", false);
+        self.tsmf_filter.validate("filters", "tsmf-filter", false);
         self.service_filter
             .validate("filters", "service-filter", true);
         self.program_filter
@@ -832,6 +861,7 @@ impl Default for FiltersConfig {
     fn default() -> Self {
         FiltersConfig {
             tuner_filter: Default::default(),
+            tsmf_filter: Self::default_tsmf_filter(),
             service_filter: Self::default_service_filter(),
             decode_filter: Default::default(),
             program_filter: Self::default_program_filter(),
@@ -2459,6 +2489,7 @@ mod tests {
                 services: vec![],
                 excluded_services: vec![],
                 disabled: false,
+                tsmf_rel_ts: None,
                 routes: vec![],
             }
         }
@@ -2552,6 +2583,7 @@ mod tests {
                 services: vec![],
                 excluded_services: vec![],
                 disabled: false,
+                tsmf_rel_ts: None,
                 routes: vec![],
             }
         }
@@ -2697,6 +2729,7 @@ mod tests {
             services: vec![],
             excluded_services: vec![],
             disabled: false,
+            tsmf_rel_ts: None,
             routes: vec![
                 ChannelRouteConfig {
                     tuner: "gr".to_string(),
@@ -2771,6 +2804,7 @@ mod tests {
             services: vec![],
             excluded_services: vec![],
             disabled: false,
+            tsmf_rel_ts: None,
             routes: vec![ChannelRouteConfig {
                 tuner: "a".to_string(),
                 channel: None,
@@ -2924,6 +2958,7 @@ mod tests {
             services: vec![],
             excluded_services: vec![],
             disabled: false,
+            tsmf_rel_ts: None,
             routes: vec![],
         }
     }
@@ -3905,6 +3940,7 @@ mod tests {
     fn use_stub_commands(config: &mut Config) {
         config.filters.service_filter.command = "true".to_string();
         config.filters.program_filter.command = "true".to_string();
+        config.filters.tsmf_filter.command = "true".to_string();
         config.timeshift.command = "true".to_string();
         config.jobs.scan_services.command = "true".to_string();
         config.jobs.sync_clocks.command = "true".to_string();
@@ -4855,5 +4891,115 @@ mod tests {
         assert!(is_valid_command("/bin/sh"));
         assert!(!is_valid_command("no-such-command"));
         assert!(!is_valid_command("/bin/no-such-command"));
+    }
+
+    #[test]
+    fn test_config_tsmf_rel_ts_defaults_to_none() {
+        let config = serde_norway::from_str::<Config>(
+            r#"
+            channels:
+              - name: gr
+                type: GR
+                channel: '0'
+            tuners:
+              - name: GR0
+                types: [GR]
+                command: 'true'
+            resource:
+              strings-yaml: /bin/sh
+        "#,
+        )
+        .unwrap();
+        assert_eq!(config.channels[0].tsmf_rel_ts, None);
+        assert_eq!(
+            config.filters.tsmf_filter.command,
+            "mirakc-arib filter-tsmf --relative-ts={{{tsmf_rel_ts}}}"
+        );
+    }
+
+    #[test]
+    fn test_config_tsmf_rel_ts_is_parsed() {
+        // `tsmf-rel-ts` and the Mirakurun-compatible alias `tsmfRelTs` are
+        // both accepted.
+        let config = serde_norway::from_str::<Config>(
+            r#"
+            channels:
+              - name: catv
+                type: GR
+                channel: '13'
+                tsmf-rel-ts: 3
+            tuners:
+              - name: GR0
+                types: [GR]
+                command: 'true'
+            resource:
+              strings-yaml: /bin/sh
+        "#,
+        )
+        .unwrap();
+        assert_eq!(config.channels[0].tsmf_rel_ts, Some(3));
+
+        let config = serde_norway::from_str::<Config>(
+            r#"
+            channels:
+              - name: catv
+                type: GR
+                channel: '13'
+                tsmfRelTs: 7
+            tuners:
+              - name: GR0
+                types: [GR]
+                command: 'true'
+            resource:
+              strings-yaml: /bin/sh
+        "#,
+        )
+        .unwrap();
+        assert_eq!(config.channels[0].tsmf_rel_ts, Some(7));
+    }
+
+    #[test]
+    fn test_config_tsmf_rel_ts_is_propagated_to_epg_channel() {
+        let config = serde_norway::from_str::<ChannelConfig>(
+            r#"
+            name: catv
+            type: GR
+            channel: '13'
+            tsmf-rel-ts: 5
+        "#,
+        )
+        .unwrap();
+        let channel: crate::epg::EpgChannel = config.into();
+        assert_eq!(channel.tsmf_rel_ts, Some(5));
+    }
+
+    #[test]
+    #[should_panic(expected = "config.channels[0].tsmf-rel-ts: must be between 1 and 15")]
+    fn test_config_validate_tsmf_rel_ts_zero() {
+        let config = serde_norway::from_str::<ChannelConfig>(
+            r#"
+            name: catv
+            type: GR
+            channel: '13'
+            tsmf-rel-ts: 0
+        "#,
+        )
+        .unwrap();
+        config.validate(0);
+    }
+
+    #[test]
+    #[should_panic(expected = "config.channels[0].tsmf-rel-ts: must be between 1 and 15")]
+    fn test_config_validate_tsmf_rel_ts_too_large() {
+        let config = serde_norway::from_str::<ChannelConfig>(
+            r#"
+            name: catv
+            type: GR
+            channel: '13'
+            tsmf-rel-ts: 16
+        "#,
+        )
+        .unwrap();
+        config.validate(0);
     }
 }

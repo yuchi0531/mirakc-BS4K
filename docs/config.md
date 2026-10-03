@@ -24,6 +24,7 @@ suitable for your environment.
 | [channels\[\].services]                  | `[]`                              |
 | [channels\[\].excluded-services]         | `[]`                              |
 | [channels\[\].disabled]                  | `false`                           |
+| [channels\[\].tsmf-rel-ts]               | `None`                            |
 | [channels\[\].routes]                    | `[]`                              |
 | [tuners\[\].name]                        |                                   |
 | [tuners\[\].types]                       |                                   |
@@ -34,6 +35,7 @@ suitable for your environment.
 | [tuners\[\].tlv-decoder]                 | `''`                              |
 | [tuners\[\].excluded-channels]           | `[]`                              |
 | [filters.tuner-filter.command]           | `''`                              |
+| [filters.tsmf-filter.command]            | `mirakc-arib filter-tsmf --relative-ts={{{tsmf_rel_ts}}}` |
 | [filters.service-filter.command]         | `mirakc-arib filter-service --sid={{{sid}}}` |
 | [filters.decode-filter.command]          | `''`                              |
 | [filters.program-filter.command]         | `mirakc-arib filter-program --sid={{{sid}}} --eid={{{eid}}} --clock-pid={{{clock_pid}}} --clock-pcr={{{clock_pcr}}} --clock-time={{{clock_time}}} --end-margin=2000{{#video_tags}} --video-tag={{{.}}}{{/video_tags}}{{#audio_tags}} --audio-tag={{{.}}}{{/audio_tags}}{{#if wait_until}} --wait-until={{{wait_until}}}{{/if}}` |
@@ -90,6 +92,7 @@ suitable for your environment.
 [channels\[\].services]: #channels
 [channels\[\].excluded-services]: #channels
 [channels\[\].disabled]: #channels
+[channels\[\].tsmf-rel-ts]: #channels
 [channels\[\].routes]: #routes
 [tuners\[\].name]: #tuners
 [tuners\[\].types]: #tuners
@@ -100,6 +103,7 @@ suitable for your environment.
 [tuners\[\].tlv-decoder]: #tuners
 [tuners\[\].excluded-channels]: #tuners
 [filters.tuner-filter.command]: #filterstuner-filter
+[filters.tsmf-filter.command]: #filterstsmf-filter
 [filters.service-filter.command]: #filtersservice-filter
 [filters.decode-filter.command]: #filtersdecode-filter
 [filters.program-filter.command]: #filtersprogram-filter
@@ -445,6 +449,14 @@ Definitions of channels.  At least, one channel must be defined.
   * Applied after processing the `services` property
 * disabled (optional)
   * Disable the channel definition
+* tsmf-rel-ts (optional)
+  * A TSMF (MPEG-TS Multi Frame) relative TS number between 1 and 15
+  * Used for CATV retransmissions which multiplex multiple TS streams into one
+    MPEG-TS stream
+  * When specified, mirakc inserts `filters.tsmf-filter` into the tuner pipeline
+    so that only the specified relative TS stream is extracted
+  * Compatible with the `tsmfRelTs` property of Mirakurun (the alias `tsmfRelTs`
+    is also accepted)
 * routes (optional)
   * A list of routes tried in order when a tuner is activated for the channel
   * See [routes](#routes) for details
@@ -944,11 +956,11 @@ The following properties can be specified in `config.yml`:
 
 Each filter has the following properties:
 
-| PROPERTY     | tuner-filter | decode-filter | service-filter | program-filter | pre-filter | post-filter |
-| ------------ | ------------ | ------------- | -------------- | -------------- | ---------- | ----------- |
-| command      | `?`          | `?`           | `?`            | `?`            | `?`        | `?`         |
-| seekable     | `false`      | `false`       | `false`        | `false`        | `?`        | `?`         |
-| content-type |              |               |                |                |            | `?`         |
+| PROPERTY     | tuner-filter | tsmf-filter | decode-filter | service-filter | program-filter | pre-filter | post-filter |
+| ------------ | ------------ | ----------- | ------------- | -------------- | -------------- | ---------- | ----------- |
+| command      | `?`          | `?`         | `?`           | `?`            | `?`            | `?`        | `?`         |
+| seekable     | `false`      | `false`     | `false`       | `false`        | `false`        | `?`        | `?`         |
+| content-type |              |             |               |                |                |            | `?`         |
 
 Where:
 
@@ -968,6 +980,9 @@ with the following template parameters:
   * The `type` property of a channel defined in the `channels`
 * channel
   * The `channel` property of a channel defined in the `channels`
+* tsmf_rel_ts
+  * The `tsmf-rel-ts` property of a channel defined in the `channels`
+  * Available only for `filters.tsmf-filter`
 * user
   * Contains information about a user of the stream
   * See `test_make_filter()` in [//mirakc-core/src/filter.rs](../mirakc-core/src/filter.rs)
@@ -1012,6 +1027,7 @@ Each filter has the following template parameter:
 | channel_name | `*`          | `*`           | `*`            | `*`            | `*`        | `*`         |
 | channel_type | `*`          | `*`           | `*`            | `*`            | `*`        | `*`         |
 | channel      | `*`          | `*`           | `*`            | `*`            | `*`        | `*`         |
+| tsmf_rel_ts  |              | `*`           |                |                |            |             |
 | user         |              |               | `*`            | `*`            | `SP`       | `SP`        |
 | sid          |              |               | `*`            | `*`            | `SPRTL`    | `SPRTL`     |
 | eid          |              |               |                | `*`            | `PRT`      | `PRT`       |
@@ -1046,6 +1062,23 @@ This filter will be used not only for streaming API endpoints but also
 background jobs if it's defined.
 
 For example, this filter can be used for the drop-check for each tuner.
+
+### filters.tsmf-filter
+
+A filter to extract a relative TS stream from a TSMF (MPEG-TS Multi Frame)
+stream.
+
+TSMF multiplexes up to 15 relative TS streams into a single MPEG-TS stream for
+CATV retransmission.  This filter outputs only the packets belonging to the
+relative TS number specified with the `tsmf-rel-ts` property of a channel.
+
+This filter is inserted into the tuner pipeline after the tuner command, the
+`tuners[].tlv-decoder` and `filters.tuner-filter`, so every consumer of the
+tuner, including streaming API endpoints and background jobs, sees the
+extracted TS.
+
+The default command is `mirakc-arib filter-tsmf --relative-ts={{{tsmf_rel_ts}}}`.
+The `tsmf_rel_ts` template parameter is only available for this filter.
 
 ### filters.service-filter
 

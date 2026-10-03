@@ -1034,6 +1034,9 @@ pub struct EpgChannel {
     pub channel: String,
     #[serde(default)]
     pub extra_args: String,
+    /// TSMF relative TS number for CATV, propagated from `ChannelConfig`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tsmf_rel_ts: Option<u8>,
     pub services: Vec<Sid>,
     pub excluded_services: Vec<Sid>,
 }
@@ -1051,6 +1054,7 @@ impl From<ChannelConfig> for EpgChannel {
             channel_type: config.channel_type,
             channel: config.channel,
             extra_args: config.extra_args,
+            tsmf_rel_ts: config.tsmf_rel_ts,
             services: config.services,
             excluded_services: config.excluded_services,
         }

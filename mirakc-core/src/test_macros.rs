@@ -91,6 +91,7 @@ macro_rules! channel {
             channel_type: $channel_type,
             channel: $channel.to_string(),
             extra_args: "".to_string(),
+            tsmf_rel_ts: None,
             services: vec![],
             excluded_services: vec![],
         }

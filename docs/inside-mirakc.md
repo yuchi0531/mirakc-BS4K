@@ -33,7 +33,13 @@ A web streaming is performed with the following pipeline:
 | tuner-command (external process)           |
 |   |                                        |
 |   V                                        |
+| tlv-decoder (external process) [optional]  |
+|   |                                        |
+|   V                                        |
 | tuner-filter (external process) [optional] |
+|   |                                        |
+|   V                                        |
+| tsmf-filter (external process) [optional]  |
 +---|----------------------------------------+
     |
 +---V------ Broadcaster -----------------+
@@ -96,7 +102,13 @@ A (normal) recording is performed with the following pipeline:
 | tuner-command (external process)           |
 |   |                                        |
 |   V                                        |
+| tlv-decoder (external process) [optional]  |
+|   |                                        |
+|   V                                        |
 | tuner-filter (external process) [optional] |
+|   |                                        |
+|   V                                        |
+| tsmf-filter (external process) [optional]  |
 +---|----------------------------------------+
     |
 +---V------ Broadcaster -----------------+
@@ -131,7 +143,13 @@ A timeshift recording is performed with the following pipeline:
 | tuner-command (external process)           |
 |   |                                        |
 |   V                                        |
+| tlv-decoder (external process) [optional]  |
+|   |                                        |
+|   V                                        |
 | tuner-filter (external process) [optional] |
+|   |                                        |
+|   V                                        |
+| tsmf-filter (external process) [optional]  |
 +---|----------------------------------------+
     |
 +---V------ Broadcaster -----------------+

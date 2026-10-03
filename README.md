@@ -9,6 +9,10 @@
 - channels.ymlにroutesフィールドを追加しcatvなど別経路で同じ放送波が受信できる場合に対応(Inspired by [Mahiron](https://github.com/rokoucha/Mahiron))
   - 起動失敗時のみ次の経路へフォールバック
 - `X-Mirakc-Tuner`ヘッダでクライアント指定のチューナーに固定(channel streamのみ、routesを無視して厳密固定、未知名は400)
+- channels.ymlに`tsmf-rel-ts`フィールドを追加(Mirakurun互換。別名`tsmfRelTs`も可)
+  - CATVのTSMF(MPEG-TS Multi Frame)多重フレームから指定した相対TS番号(1〜15)を抽出
+  - tunerパイプライン直後に`filters.tsmf-filter`(`mirakc-arib filter-tsmf --relative-ts=...`)を挿入し、ストリーミング/EPGジョブ/録画の全消費者に適用
+  - 抽出コマンドは[mirakc-arib fork](https://github.com/yuchi0531/mirakc-arib)に`filter-tsmf`として実装
 
 詳細は [docs/config.md](./docs/config.md) / [docs/web-api.md](./docs/web-api.md) を参照
 

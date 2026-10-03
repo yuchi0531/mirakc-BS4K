@@ -50,9 +50,11 @@ A [`mirakc/buildenv`] image is used as a build environment for each target platf
 * recpt1
 
 The mirakc images built from [`Dockerfile`](./Dockerfile) additionally contain
-the following command used by the BS4K/TLV jobs (`jobs.*.command-bs4k`):
+the following commands:
 
-* [mirakc-arib-tlv] v0.1.0
+* [mirakc-arib] (forked) built from source, adding the `filter-tsmf`
+  sub-command used by `filters.tsmf-filter` (`channels[].tsmf-rel-ts`)
+* [mirakc-arib-tlv] v0.1.0, used by the BS4K/TLV jobs (`jobs.*.command-bs4k`)
 
 [`mirakc/tools`] images on Docker Hub can be updated by running
 [`//scripts/update-tools-images.sh`](../scripts/update-tools-images.sh).
@@ -62,4 +64,5 @@ the following command used by the BS4K/TLV jobs (`jobs.*.command-bs4k`):
 
 [`mirakc/buildenv`]: https://hub.docker.com/r/mirakc/buildenv
 [`mirakc/tools`]: https://hub.docker.com/r/mirakc/tools
+[mirakc-arib]: https://github.com/yuchi0531/mirakc-arib
 [mirakc-arib-tlv]: https://github.com/yuchi0531/mirakc-arib-tlv

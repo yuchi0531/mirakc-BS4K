@@ -53,6 +53,7 @@ where
                     channel_type: sv.channel.channel_type,
                     channel: sv.channel.channel.clone(),
                     extra_args: sv.channel.extra_args.clone(),
+                    tsmf_rel_ts: sv.channel.tsmf_rel_ts,
                     services: vec![sv.sid()],
                     excluded_services: vec![],
                 });

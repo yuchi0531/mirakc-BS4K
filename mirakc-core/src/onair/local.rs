@@ -380,6 +380,7 @@ mod tests {
                     channel_type: $channel_type,
                     channel: Default::default(),
                     extra_args: Default::default(),
+                    tsmf_rel_ts: Default::default(),
                     services: Default::default(),
                     excluded_services: Default::default(),
                 },

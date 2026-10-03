@@ -272,8 +272,7 @@ impl TunerManager {
         if let Some(tuner) = found {
             tracing::debug!(tuner.index, %channel, %user.info, "Use reserved tuner");
             if !tuner.is_active() {
-                let filters =
-                    Self::make_filter_commands(tuner, channel, &self.config.filters.tuner_filter)?;
+                let filters = Self::make_tuner_filter_commands(tuner, channel, &self.config)?;
                 tuner.activate(channel, filters, ctx).await?;
             }
             self.event_emitters
@@ -302,8 +301,7 @@ impl TunerManager {
             .find(|tuner| tuner.is_available_for(channel));
         if let Some(tuner) = found {
             tracing::debug!(tuner.index, %channel, %user.info, "Use tuner");
-            let filters =
-                Self::make_filter_commands(tuner, channel, &self.config.filters.tuner_filter)?;
+            let filters = Self::make_tuner_filter_commands(tuner, channel, &self.config)?;
             tuner.activate(channel, filters, ctx).await?;
             self.event_emitters
                 .emit(Event::StatusChanged(tuner.index))
@@ -322,8 +320,7 @@ impl TunerManager {
             .min_by(|a, b| a.priority().cmp(&b.priority()));
         if let Some(tuner) = found {
             tracing::debug!(tuner.index, %channel, %user.info, %user.priority, "Grab tuner");
-            let filters =
-                Self::make_filter_commands(tuner, channel, &self.config.filters.tuner_filter)?;
+            let filters = Self::make_tuner_filter_commands(tuner, channel, &self.config)?;
             tuner.deactivate();
             self.event_emitters
                 .emit(Event::StatusChanged(tuner.index))
@@ -390,11 +387,8 @@ impl TunerManager {
                     "Use reserved tuner"
                 );
                 if !tuner.is_active() {
-                    let filters = Self::make_filter_commands(
-                        tuner,
-                        &effective,
-                        &self.config.filters.tuner_filter,
-                    )?;
+                    let filters =
+                        Self::make_tuner_filter_commands(tuner, &effective, &self.config)?;
                     if let Err(err) = tuner
                         .activate_with_startup_probe(&effective, filters, ctx)
                         .await
@@ -438,11 +432,7 @@ impl TunerManager {
                     %user.info,
                     "Use tuner"
                 );
-                let filters = Self::make_filter_commands(
-                    tuner,
-                    &effective,
-                    &self.config.filters.tuner_filter,
-                )?;
+                let filters = Self::make_tuner_filter_commands(tuner, &effective, &self.config)?;
                 if let Err(err) = tuner
                     .activate_with_startup_probe(&effective, filters, ctx)
                     .await
@@ -472,11 +462,7 @@ impl TunerManager {
                     %user.priority,
                     "Grab tuner"
                 );
-                let filters = Self::make_filter_commands(
-                    tuner,
-                    &effective,
-                    &self.config.filters.tuner_filter,
-                )?;
+                let filters = Self::make_tuner_filter_commands(tuner, &effective, &self.config)?;
                 tuner.deactivate();
                 let index = tuner.index;
                 self.event_emitters.emit(Event::StatusChanged(index)).await;
@@ -562,8 +548,7 @@ impl TunerManager {
                 "Use pinned reserved tuner"
             );
             if !tuner.is_active() {
-                let filters =
-                    Self::make_filter_commands(tuner, channel, &self.config.filters.tuner_filter)?;
+                let filters = Self::make_tuner_filter_commands(tuner, channel, &self.config)?;
                 if let Err(err) = tuner
                     .activate_with_startup_probe(channel, filters, ctx)
                     .await
@@ -607,8 +592,7 @@ impl TunerManager {
                 %user.info,
                 "Use pinned tuner"
             );
-            let filters =
-                Self::make_filter_commands(tuner, channel, &self.config.filters.tuner_filter)?;
+            let filters = Self::make_tuner_filter_commands(tuner, channel, &self.config)?;
             if let Err(err) = tuner
                 .activate_with_startup_probe(channel, filters, ctx)
                 .await
@@ -638,8 +622,7 @@ impl TunerManager {
                 %user.priority,
                 "Grab pinned tuner"
             );
-            let filters =
-                Self::make_filter_commands(tuner, channel, &self.config.filters.tuner_filter)?;
+            let filters = Self::make_tuner_filter_commands(tuner, channel, &self.config)?;
             tuner.deactivate();
             let index = tuner.index;
             self.event_emitters.emit(Event::StatusChanged(index)).await;
@@ -689,24 +672,39 @@ impl TunerManager {
     fn make_filter_commands(
         tuner: &Tuner,
         channel: &EpgChannel,
+        filters: &mut Vec<String>,
         filter: &FilterConfig,
-    ) -> Result<Vec<String>, Error> {
-        if filter.command.is_empty() {
-            return Ok(vec![]);
-        }
-        let filter = match Self::make_filter_command(tuner, channel, &filter.command) {
-            Ok(filter) => filter,
+    ) -> Result<(), Error> {
+        let value = match Self::make_filter_command(tuner, channel, &filter.command) {
+            Ok(value) => value,
             Err(err) => {
                 tracing::error!(tuner.index, %channel, "Failed to render tuner-filter");
                 return Err(err);
             }
         };
-        if filter.trim().is_empty() {
-            tracing::warn!(tuner.index, %channel, "Empty tuner-filter");
-            Ok(vec![])
-        } else {
-            Ok(vec![filter])
+        if !value.trim().is_empty() {
+            filters.push(value);
         }
+        Ok(())
+    }
+
+    // The head filters inserted into the tuner pipeline:
+    //   tuner-filter | tsmf-filter
+    // The tsmf-filter is rendered only for channels carrying a
+    // `tsmf-rel-ts` property, i.e. CATV TSMF retransmissions.
+    fn make_tuner_filter_commands(
+        tuner: &Tuner,
+        channel: &EpgChannel,
+        config: &Config,
+    ) -> Result<Vec<String>, Error> {
+        let mut filters = vec![];
+        if !config.filters.tuner_filter.command.is_empty() {
+            Self::make_filter_commands(tuner, channel, &mut filters, &config.filters.tuner_filter)?;
+        }
+        if channel.tsmf_rel_ts.is_some() {
+            Self::make_filter_commands(tuner, channel, &mut filters, &config.filters.tsmf_filter)?;
+        }
+        Ok(filters)
     }
 
     // Template variables regarding TunerUser are not specified
@@ -723,6 +721,7 @@ impl TunerManager {
             .insert_str("channel_name", &channel.name)
             .insert("channel_type", &channel.channel_type)?
             .insert_str("channel", &channel.channel)
+            .insert("tsmf_rel_ts", &channel.tsmf_rel_ts)?
             .build();
         Ok(template.render_data_to_string(&data)?)
     }
@@ -3383,6 +3382,32 @@ mod tests {
 
     fn create_user(priority: TunerUserPriority) -> TunerUser {
         tuner_user!(priority, job; "test")
+    }
+
+    #[test]
+    fn test_make_tuner_filter_commands_inserts_tsmf_filter() {
+        let config = create_config("true".to_string());
+        let tuner = Tuner::new(0, &config);
+        let mut full_config = Config::default();
+        full_config.filters.service_filter.command = "true".to_string();
+        full_config.filters.program_filter.command = "true".to_string();
+
+        // A channel without `tsmf-rel-ts` only gets the tuner-filter.
+        full_config.filters.tuner_filter.command = "tuner-filter".to_string();
+        let channel = create_channel("0");
+        let filters =
+            TunerManager::make_tuner_filter_commands(&tuner, &channel, &full_config).unwrap();
+        assert_eq!(filters, vec!["tuner-filter"]);
+
+        // A channel with `tsmf-rel-ts` additionally gets the tsmf-filter.
+        let mut channel = create_channel("0");
+        channel.tsmf_rel_ts = Some(3);
+        let filters =
+            TunerManager::make_tuner_filter_commands(&tuner, &channel, &full_config).unwrap();
+        assert_eq!(
+            filters,
+            vec!["tuner-filter", "mirakc-arib filter-tsmf --relative-ts=3"]
+        );
     }
 }
 

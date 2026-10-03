@@ -22,6 +22,7 @@ impl Call<QueryChannel> for EpgStub {
                 channel_type: msg.channel_type,
                 channel: msg.channel.clone(),
                 extra_args: "".to_string(),
+                tsmf_rel_ts: None,
                 services: Vec::new(),
                 excluded_services: Vec::new(),
             }))
@@ -44,6 +45,7 @@ impl Call<QueryServices> for EpgStub {
                     channel_type: ChannelType::GR,
                     channel: "ch".to_string(),
                     extra_args: "".to_string(),
+                    tsmf_rel_ts: None,
                     services: Vec::new(),
                     excluded_services: Vec::new(),
                 },
@@ -74,6 +76,7 @@ impl Call<QueryService> for EpgStub {
                         channel_type: ChannelType::GR,
                         channel: channel.to_string(),
                         extra_args: "".to_string(),
+                        tsmf_rel_ts: None,
                         services: Vec::new(),
                         excluded_services: Vec::new(),
                     },

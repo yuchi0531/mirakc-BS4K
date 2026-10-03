@@ -76,6 +76,7 @@ impl<T> TimeshiftRecorder<T> {
                 channel_type: ChannelType::GR,
                 channel: "".to_string(),
                 extra_args: "".to_string(),
+                tsmf_rel_ts: None,
                 services: vec![],
                 excluded_services: vec![],
             },
