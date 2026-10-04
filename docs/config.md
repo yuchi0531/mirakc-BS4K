@@ -438,6 +438,9 @@ Definitions of channels.  At least, one channel must be defined.
   * One of channel types in `GR`, `BS`, `CS`, `SKY` and `BS4K`
 * channel
   * A channel parameter used in a tuner command template
+  * An opaque string passed to the tuner command as-is.  In addition to a
+    plain number such as `'26'`, alphanumeric CATV-style names such as `'C17'`
+    are accepted.
 * extra-args
   * Extra arguments used in a tuner command template
 * services

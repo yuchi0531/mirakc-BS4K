@@ -5002,4 +5002,23 @@ mod tests {
         .unwrap();
         config.validate(0);
     }
+
+    #[test]
+    fn test_channel_accepts_alphanumeric_channel() {
+        // The `channel` property is an opaque string passed to the tuner
+        // command as-is.  Besides plain numbers it also accepts CATV-style
+        // channel names such as `C17`.
+        for channel in ["26", "C17", "CS2", "BS15_0", "CH585", "000"] {
+            let config = serde_norway::from_str::<ChannelConfig>(&format!(
+                r#"
+                name: test
+                type: GR
+                channel: '{channel}'
+                "#
+            ))
+            .unwrap();
+            assert_eq!(config.channel, channel);
+            config.validate(0);
+        }
+    }
 }

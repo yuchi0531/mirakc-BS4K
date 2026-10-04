@@ -3409,6 +3409,29 @@ mod tests {
             vec!["tuner-filter", "mirakc-arib filter-tsmf --relative-ts=3"]
         );
     }
+
+    #[test]
+    fn test_make_command_accepts_alphanumeric_channel() {
+        // The `channel` property is passed to the tuner command template
+        // as-is, so CATV-style names such as `C17` work out of the box.
+        let config = TunerConfig {
+            name: "tuner".to_string(),
+            channel_types: vec![ChannelType::GR],
+            command: "recdvb {{{channel}}} {{{duration}}} -".to_string(),
+            ..Default::default()
+        };
+        let tuner = Tuner::new(0, &config);
+
+        for (channel, expected) in [
+            ("26", "recdvb 26 - -"),
+            ("C17", "recdvb C17 - -"),
+            ("CS2", "recdvb CS2 - -"),
+        ] {
+            let epg_channel = create_channel(channel);
+            let rendered = tuner.make_command(&epg_channel).unwrap();
+            assert_eq!(rendered, expected);
+        }
+    }
 }
 
 #[cfg(test)]
