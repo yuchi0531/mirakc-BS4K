@@ -554,7 +554,8 @@ or polarization is specified.
 
 * `channel` is an opaque StreamID string passed through to the tuner command
   as `{{{channel}}}`.
-  * Decimal and `0x`-prefixed hex forms are accepted as-is.
+  * Any non-empty string is accepted.  Decimal (`'45328'`), `0x`-prefixed hex
+    (`'0xB110'`) and bare hex are passed through as-is.
   * For example, `'45328'` and `'0xB110'` select the same stream.
   * Always quote the value so it stays a string.
   * A StreamID is not a serviceId.

@@ -637,37 +637,11 @@ impl ChannelConfig {
             !self.channel.is_empty(),
             "config.channels[{index}].channel: must be a non-empty string"
         );
-        if self.channel_type == ChannelType::BS4K {
-            // BS4K channels carry an opaque StreamID as-is to the tuner
-            // command (e.g. `{{{channel}}}`).  No frequency/polarization/TSID
-            // conversion is done in mirakc.  Accept a decimal integer or a
-            // `0x`/`0X`-prefixed hexadecimal integer.  No range check is
-            // performed here; out-of-range values simply fail at tuning time.
-            validate!(
-                Self::is_valid_bs4k_channel(&self.channel),
-                "config.channels[{index}].channel: must be a decimal or \
-                 0x-prefixed hexadecimal StreamID for BS4K"
-            );
-        }
         if let Some(tsmf_rel_ts) = self.tsmf_rel_ts {
             validate!(
                 (1..=15).contains(&tsmf_rel_ts),
                 "config.channels[{index}].tsmf-rel-ts: must be between 1 and 15"
             );
-        }
-    }
-
-    fn is_valid_bs4k_channel(channel: &str) -> bool {
-        if channel.is_empty() {
-            return false;
-        }
-        if let Some(hex) = channel
-            .strip_prefix("0x")
-            .or_else(|| channel.strip_prefix("0X"))
-        {
-            !hex.is_empty() && hex.bytes().all(|b| b.is_ascii_hexdigit())
-        } else {
-            channel.bytes().all(|b| b.is_ascii_digit())
         }
     }
 }
@@ -2987,15 +2961,25 @@ mod tests {
 
     #[test]
     fn test_channel_config_validate_bs4k() {
-        // Decimal StreamIDs pass through with no range check.
+        // BS4K treats `channel` exactly like other channel types: an opaque,
+        // non-empty string passed to the tuner command as-is.  Decimal, hex
+        // and any other StreamID representation are accepted without a format
+        // check.  Out-of-range values simply fail at tuning time.
         for channel in ["45168", "45328", "0", "65535", "999999"] {
             let mut config = channel_config();
             config.channel_type = ChannelType::BS4K;
             config.channel = channel.to_string();
             config.validate(0);
         }
-        // `0x`/`0X`-prefixed hex StreamIDs pass through as well.
+        // `0x`/`0X`-prefixed hex StreamIDs are accepted as well.
         for channel in ["0x0", "0xB078", "0XB078", "0xFF"] {
+            let mut config = channel_config();
+            config.channel_type = ChannelType::BS4K;
+            config.channel = channel.to_string();
+            config.validate(0);
+        }
+        // Bare hex and arbitrary non-empty strings are accepted too.
+        for channel in ["B078", "BS8K", "not-a-stream-id"] {
             let mut config = channel_config();
             config.channel_type = ChannelType::BS4K;
             config.channel = channel.to_string();
@@ -3018,24 +3002,20 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(
-        expected = "config.channels[0].channel: must be a decimal or 0x-prefixed hexadecimal StreamID for BS4K"
-    )]
-    fn test_channel_config_validate_bs4k_invalid() {
+    fn test_channel_config_validate_bs4k_accepts_bare_hex() {
+        // A bare hex StreamID without the `0x` prefix is accepted.
         let mut config = channel_config();
         config.channel_type = ChannelType::BS4K;
-        config.channel = "BS8K".to_string();
+        config.channel = "B078".to_string();
         config.validate(0);
     }
 
     #[test]
-    #[should_panic(
-        expected = "config.channels[0].channel: must be a decimal or 0x-prefixed hexadecimal StreamID for BS4K"
-    )]
-    fn test_channel_config_validate_bs4k_bare_hex() {
+    fn test_channel_config_validate_bs4k_accepts_alphanumeric_channel() {
+        // CATV-style channel names are accepted for BS4K as well.
         let mut config = channel_config();
         config.channel_type = ChannelType::BS4K;
-        config.channel = "B078".to_string();
+        config.channel = "C17".to_string();
         config.validate(0);
     }
 
