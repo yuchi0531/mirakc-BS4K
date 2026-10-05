@@ -867,6 +867,18 @@ Command template variables:
 * extra_args
   * The `extra-args` property of a channel defined in the `channels`
 
+The variables above can be written with [Mustache](https://mustache.github.io/)
+(`{{{channel}}}`, `{{{channel_type}}}`, `{{{extra_args}}}`, `{{{duration}}}`)
+or with the Mirakurun-compatible angle-bracket notation.
+
+For Mirakurun compatibility, `<channel>` and `<type>` are replaced with the
+channel and the channel type, exactly like Mirakurun's `replaceCommandTemplate`.
+As a mirakc extension, `<extra-args>` and `<duration>` are also available.
+
+With the angle-bracket notation, unknown placeholders such as `<foo>` are
+replaced with an empty string, like Mirakurun.  A `<...>` that is not a valid
+placeholder name (e.g. `<not a name>`) is left untouched.
+
 Cascading upstream Mirakurun-compatible servers is unsupported.  However, it's
 possible to use upstream Mirakurun-compatible servers as tuners.  See the sample
 below.
@@ -878,6 +890,12 @@ tuners:
     types: [GR]
     command: >-
       recdvb {{{channel}}} {{{duration}}} -
+
+  # Mirakurun-compatible angle-bracket notation.
+  - name: GR1
+    types: [GR]
+    command: >-
+      recdvb <channel> <duration> -
 
   - name: Disabled
     types: [GR]
