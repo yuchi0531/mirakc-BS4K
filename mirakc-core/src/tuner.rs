@@ -1176,7 +1176,11 @@ impl Tuner {
     }
 
     fn make_command(&self, channel: &EpgChannel) -> Result<String, Error> {
-        let template = mustache::compile_str(&self.command)?;
+        // Mirakurun-compatible `<name>` placeholders: `<channel>`, `<type>`,
+        // `<extra-args>`, `<duration>`.  Unknown placeholders become empty
+        // strings, like Mirakurun's `replaceCommandTemplate`.
+        let command = replace_channel_vars(&self.command, channel);
+        let template = mustache::compile_str(&command)?;
         let data = mustache::MapBuilder::new()
             .insert("channel_type", &channel.channel_type)?
             .insert_str("channel", &channel.channel)
@@ -1185,6 +1189,53 @@ impl Tuner {
             .build();
         Ok(template.render_data_to_string(&data)?)
     }
+}
+
+/// Replaces Mirakurun-compatible `<name>` placeholders in a tuner command.
+///
+/// Mirakurun uses `<channel>`, `<type>`, `<extra-args>` and `<duration>` (the
+/// last one is `-`) in `tuners[].command`.  The name is case-sensitive and
+/// unknown names are replaced with an empty string, matching Mirakurun's
+/// `replaceCommandTemplate`.
+///
+/// A name may contain `a-z`, `0-9`, `-`, `_` and `.`, as in Mirakurun.
+fn replace_channel_vars(command: &str, channel: &EpgChannel) -> String {
+    let mut result = String::with_capacity(command.len());
+    let mut rest = command;
+    while let Some(start) = rest.find('<') {
+        result.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        match after.find('>') {
+            Some(end) => {
+                let name = &after[..end];
+                if name.is_empty() || !name.bytes().all(is_var_name_byte) {
+                    // Not a placeholder.  Keep the original text.
+                    result.push('<');
+                    result.push_str(&after[..end + 1]);
+                } else {
+                    match name {
+                        "channel" => result.push_str(&channel.channel),
+                        "type" => result.push_str(&channel.channel_type.to_string()),
+                        "extra-args" => result.push_str(&channel.extra_args),
+                        "duration" => result.push('-'),
+                        _ => (), // Unknown placeholder -> empty string.
+                    }
+                }
+                rest = &after[end + 1..];
+            }
+            None => {
+                // No closing '>', keep the rest as-is.
+                result.push_str(&rest[start..]);
+                rest = "";
+            }
+        }
+    }
+    result.push_str(rest);
+    result
+}
+
+fn is_var_name_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.'
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -3466,6 +3517,102 @@ mod tests {
             let rendered = tuner.make_command(&epg_channel).unwrap();
             assert_eq!(rendered, expected);
         }
+    }
+
+    #[test]
+    fn test_make_command_renders_channel_type() {
+        // The broadcast type (GR/BS/CS/SKY/BS4K) is available as
+        // `{{{channel_type}}}` in a tuner command template.
+        let config = TunerConfig {
+            name: "tuner".to_string(),
+            channel_types: vec![
+                ChannelType::GR,
+                ChannelType::BS,
+                ChannelType::CS,
+                ChannelType::SKY,
+                ChannelType::BS4K,
+            ],
+            command: "tune --type={{{channel_type}}} --channel={{{channel}}}".to_string(),
+            ..Default::default()
+        };
+        let tuner = Tuner::new(0, &config);
+
+        for (channel_type, expected) in [
+            (ChannelType::GR, "tune --type=GR --channel=27"),
+            (ChannelType::BS, "tune --type=BS --channel=27"),
+            (ChannelType::CS, "tune --type=CS --channel=27"),
+            (ChannelType::SKY, "tune --type=SKY --channel=27"),
+            (ChannelType::BS4K, "tune --type=BS4K --channel=27"),
+        ] {
+            let channel = channel!("", channel_type, "27");
+            let rendered = tuner.make_command(&channel).unwrap();
+            assert_eq!(rendered, expected);
+        }
+    }
+
+    #[test]
+    fn test_make_command_mirakurun_angle_bracket_placeholders() {
+        // Mirakurun-compatible `<name>` placeholders: `<channel>`, `<type>`,
+        // `<extra-args>` and `<duration>`.
+        let config = TunerConfig {
+            name: "tuner".to_string(),
+            channel_types: vec![ChannelType::GR, ChannelType::BS4K],
+            command: "recdvb <channel> <duration> -".to_string(),
+            ..Default::default()
+        };
+        let tuner = Tuner::new(0, &config);
+
+        let channel = channel!("", ChannelType::GR, "27");
+        assert_eq!(tuner.make_command(&channel).unwrap(), "recdvb 27 - -");
+
+        let channel = channel!("", ChannelType::BS4K, "0xB110");
+        assert_eq!(tuner.make_command(&channel).unwrap(), "recdvb 0xB110 - -");
+
+        // `<type>` is the broadcast type.
+        let mut config = create_config("tune --type=<type> --channel=<channel>".to_string());
+        config.channel_types = vec![ChannelType::BS];
+        let tuner = Tuner::new(0, &config);
+        let channel = channel!("", ChannelType::BS, "BS15_0");
+        assert_eq!(
+            tuner.make_command(&channel).unwrap(),
+            "tune --type=BS --channel=BS15_0"
+        );
+
+        // `<extra-args>` is replaced with the channel's `extra-args`.
+        let mut config = create_config("tune <channel> <extra-args> -".to_string());
+        config.channel_types = vec![ChannelType::GR];
+        let tuner = Tuner::new(0, &config);
+        let mut channel = channel!("", ChannelType::GR, "13");
+        channel.extra_args = "--lnb 15".to_string();
+        assert_eq!(tuner.make_command(&channel).unwrap(), "tune 13 --lnb 15 -");
+    }
+
+    #[test]
+    fn test_make_command_angle_bracket_unknown_and_non_placeholder() {
+        // Unknown placeholders become empty strings, like Mirakurun.
+        // A `<...>` that is not a valid name is kept as-is.
+        let config = create_config("cmd <unknown> x".to_string());
+        let tuner = Tuner::new(0, &config);
+        let channel = create_channel("1");
+        assert_eq!(tuner.make_command(&channel).unwrap(), "cmd  x");
+
+        let config = create_config("cmd <not a name> x".to_string());
+        let tuner = Tuner::new(0, &config);
+        assert_eq!(tuner.make_command(&channel).unwrap(), "cmd <not a name> x");
+
+        // A stray '<' without '>' is kept as-is.
+        let config = create_config("cmd a < b".to_string());
+        let tuner = Tuner::new(0, &config);
+        assert_eq!(tuner.make_command(&channel).unwrap(), "cmd a < b");
+    }
+
+    #[test]
+    fn test_make_command_angle_and_mustache_can_coexist() {
+        // Both notations can be mixed in a single command.
+        let config = create_config("<channel>/{{{channel}}}/<type>".to_string());
+        let tuner = Tuner::new(0, &config);
+        let channel = channel!("", ChannelType::CS, "CS2");
+        assert_eq!(tuner.make_command(&channel).unwrap(), "CS2/CS2/CS");
     }
 }
 
