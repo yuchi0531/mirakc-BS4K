@@ -247,6 +247,20 @@ ends.
 
 Returns a list of tuners.
 
+Each tuner user in the `users` property contains a Mirakurun-compatible
+`streamSetting` property.  mirakc reports the channel of the tuner session and,
+when known, the network ID, service ID and event ID of the streaming request.
+
+The following Mirakurun properties are not supported and are always omitted:
+
+* `url`
+* `disableDecoder`
+* `streamInfo`
+* `streamSetting.noProvide`
+* `streamSetting.parseNIT`
+* `streamSetting.parseSDT`
+* `streamSetting.parseEIT`
+
 ## GET /api/tuners/{index}
 
 Returns a tuner model.
