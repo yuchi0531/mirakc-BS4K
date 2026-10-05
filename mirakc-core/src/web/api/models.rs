@@ -678,7 +678,11 @@ where
             .map(TunerUserPriority::from)
             .unwrap_or_default();
 
-        Ok(TunerUser { info, priority })
+        Ok(TunerUser {
+            info,
+            priority,
+            stream_setting: Default::default(),
+        })
     }
 }
 

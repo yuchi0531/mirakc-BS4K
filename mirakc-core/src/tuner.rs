@@ -1555,7 +1555,7 @@ impl TunerSession {
         let users = self
             .subscribers
             .values()
-            .map(|user| user.get_mirakurun_model())
+            .map(|user| user.get_mirakurun_model(&self.channel))
             .collect();
         (command, pids, users)
     }
@@ -1720,6 +1720,7 @@ mod tests {
                     user: TunerUser {
                         info: TunerUserInfo::OnairProgramTracker("tracker".to_string()),
                         priority: 0.into(),
+                        stream_setting: Default::default(),
                     },
                     stream_id: None,
                     tuner: None,
@@ -1765,6 +1766,7 @@ mod tests {
                     user: TunerUser {
                         info: TunerUserInfo::OnairProgramTracker("tracker".to_string()),
                         priority: 0.into(),
+                        stream_setting: Default::default(),
                     },
                     stream_id: None,
                     tuner: None,
@@ -2406,6 +2408,7 @@ mod tests {
                     user: TunerUser {
                         info: TunerUserInfo::OnairProgramTracker("tracker".to_string()),
                         priority: 0.into(),
+                        stream_setting: Default::default(),
                     },
                     stream_id: None,
                     tuner: None,
@@ -3045,12 +3048,43 @@ mod tests {
                     agent: None,
                 },
                 priority: 0.into(),
+                stream_setting: Default::default(),
             });
             assert!(tuner.is_subscribed(&subscription.id));
 
             let result = tuner.stop_streaming(subscription.id).await;
             assert!(result.is_ok());
             assert!(!tuner.is_subscribed(&subscription.id));
+        }
+        system.shutdown().await;
+    }
+
+    #[test(tokio::test)]
+    async fn test_tuner_mirakurun_user_stream_setting_uses_session_channel() {
+        let system = System::new();
+        {
+            let config = create_config("true".to_string());
+            let mut tuner = Tuner::new(0, &config);
+
+            tuner
+                .activate(&create_channel("27"), vec![], &system)
+                .await
+                .unwrap();
+            tuner.subscribe(&TunerUser {
+                info: TunerUserInfo::Web {
+                    id: "user".to_string(),
+                    agent: None,
+                },
+                priority: 0.into(),
+                stream_setting: StreamSetting::for_sid(101.into()),
+            });
+
+            let model = tuner.get_mirakurun_model();
+            assert_eq!(model.users.len(), 1);
+            let setting = model.users[0].stream_setting.as_ref().unwrap();
+            // The channel comes from the tuner session, not from the user.
+            assert_eq!(setting.channel.channel, "27");
+            assert_eq!(setting.service_id, Some(101.into()));
         }
         system.shutdown().await;
     }
@@ -3130,6 +3164,7 @@ mod tests {
                     agent: None,
                 },
                 priority: 0.into(),
+                stream_setting: Default::default(),
             });
 
             let result = tuner.stop_streaming(Default::default()).await;

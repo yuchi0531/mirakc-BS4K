@@ -53,6 +53,7 @@ where
         &service.channel,
         service_id.sid(),
         &user,
+        StreamSetting::for_service(&service),
         &filter_setting,
     )
     .await
@@ -111,6 +112,7 @@ pub(in crate::web::api) async fn do_get_service_stream<T, W>(
     channel: &EpgChannel,
     sid: Sid,
     user: &TunerUser,
+    stream_setting: StreamSetting,
     filter_setting: &FilterSetting,
 ) -> Result<Response, Error>
 where
@@ -119,6 +121,11 @@ where
     T: TriggerFactory<tuner::StopStreaming>,
     W: Spawn,
 {
+    let user = TunerUser {
+        stream_setting,
+        ..user.clone()
+    };
+
     let stream = tuner_manager
         .call(tuner::StartStreaming {
             channel: channel.clone(),
@@ -135,7 +142,7 @@ where
 
     let (filters, content_type, seekable) = build_filters(
         config,
-        user,
+        &user,
         filter_setting,
         channel,
         sid,

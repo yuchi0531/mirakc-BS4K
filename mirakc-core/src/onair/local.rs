@@ -18,6 +18,7 @@ use crate::filter::is_tlv_passthrough;
 use crate::models::ChannelType;
 use crate::models::ProgramId;
 use crate::models::ServiceId;
+use crate::models::StreamSetting;
 use crate::models::TunerUser;
 use crate::models::TunerUserInfo;
 use crate::tuner::StartStreaming;
@@ -215,6 +216,7 @@ where
         let user = TunerUser {
             info: TunerUserInfo::OnairProgramTracker(self.name.clone()),
             priority: (-1).into(),
+            stream_setting: StreamSetting::for_service(service),
         };
 
         let stream = self

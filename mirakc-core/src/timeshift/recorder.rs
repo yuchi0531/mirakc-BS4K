@@ -352,6 +352,7 @@ where
         let user = TunerUser {
             info: TunerUserInfo::TimeshiftRecorder(self.name.clone()),
             priority: config.priority.into(),
+            stream_setting: StreamSetting::for_service(&self.service),
         };
 
         let stream = self

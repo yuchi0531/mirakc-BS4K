@@ -29,30 +29,35 @@ macro_rules! tuner_user {
         crate::models::TunerUser {
             info: tuner_user_info!(job; $name),
             priority: $prio.into(),
+            stream_setting: Default::default(),
         }
     };
     ($prio:expr, onair; $name:expr) => {
         crate::models::TunerUser {
             info: tuner_user_info!(onair; $name),
             priority: $prio.into(),
+            stream_setting: Default::default(),
         }
     };
     ($prio:expr, recorder; $name:expr) => {
         crate::models::TunerUser {
             info: tuner_user_info!(recorder; $name),
             priority: $prio.into(),
+            stream_setting: Default::default(),
         }
     };
     ($prio:expr, web; $id:expr) => {
         crate::models::TunerUser {
             info: tuner_user_info!(web; $id),
             priority: $prio.into(),
+            stream_setting: Default::default(),
         }
     };
     ($prio:expr, web; $id:expr, $agent:expr) => {
         crate::models::TunerUser {
             info: tuner_user_info!(web; $id, $agent),
             priority: $prio.into(),
+            stream_setting: Default::default(),
         }
     };
 }

@@ -355,6 +355,50 @@ impl fmt::Display for TunerUserPriority {
 pub struct TunerUser {
     pub info: TunerUserInfo,
     pub priority: TunerUserPriority,
+    /// Service/program identity used to build the Mirakurun-compatible
+    /// `streamSetting` of this user.  Not part of the filter template data.
+    #[serde(skip)]
+    pub stream_setting: StreamSetting,
+}
+
+/// The service/program identity attached to a `TunerUser`.
+///
+/// mirakc keeps this separately from `TunerUserInfo` because the channel comes
+/// from the tuner session while the service/program comes from the request.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct StreamSetting {
+    pub network_id: Option<Nid>,
+    pub service_id: Option<Sid>,
+    pub event_id: Option<Eid>,
+}
+
+impl StreamSetting {
+    /// A stream of a whole service.
+    pub fn for_service(service: &EpgService) -> Self {
+        Self {
+            network_id: Some(service.id.nid()),
+            service_id: Some(service.id.sid()),
+            event_id: None,
+        }
+    }
+
+    /// A stream of a service identified by its SID only (the network is unknown).
+    pub fn for_sid(sid: Sid) -> Self {
+        Self {
+            network_id: None,
+            service_id: Some(sid),
+            event_id: None,
+        }
+    }
+
+    /// A stream of a TV program.
+    pub fn for_program(program_id: ProgramId) -> Self {
+        Self {
+            network_id: Some(program_id.nid()),
+            service_id: Some(program_id.sid()),
+            event_id: Some(program_id.eid()),
+        }
+    }
 }
 
 impl TunerUser {
@@ -366,12 +410,23 @@ impl TunerUser {
         self.info.max_stuck_time()
     }
 
-    pub fn get_mirakurun_model(&self) -> MirakurunTunerUser {
+    /// The Mirakurun-compatible user ID.
+    pub fn mirakurun_id(&self) -> String {
+        self.info.get_mirakurun_model().0
+    }
+
+    pub fn get_mirakurun_model(&self, channel: &EpgChannel) -> MirakurunTunerUser {
         let (id, agent) = self.info.get_mirakurun_model();
         MirakurunTunerUser {
             id,
             agent,
             priority: self.priority.0,
+            stream_setting: Some(MirakurunStreamSetting {
+                channel: channel.clone().into(),
+                network_id: self.stream_setting.network_id,
+                service_id: self.stream_setting.service_id,
+                event_id: self.stream_setting.event_id,
+            }),
         }
     }
 }
@@ -466,7 +521,75 @@ pub struct MirakurunTunerUser {
 
     /// Priority.
     pub priority: i32,
-    // url, disableDecoder, streamSetting and streamInfo properties are not supported.
+
+    /// Streaming settings of the user.  Mirakurun-compatible.
+    ///
+    /// mirakc does not track every property (`disableDecoder` and `streamInfo`
+    /// are still not supported), but the channel, service and program a user is
+    /// streaming are reported when they are known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_setting: Option<MirakurunStreamSetting>,
+    // url, disableDecoder and streamInfo properties are not supported.
+}
+
+/// Mirakurun-compatible `StreamSetting`.
+///
+/// See `StreamSetting` in the Mirakurun API definition.
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MirakurunStreamSetting {
+    /// The channel being streamed.
+    pub channel: MirakurunStreamSettingChannel,
+
+    /// The network ID of the service being streamed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = u16)]
+    pub network_id: Option<Nid>,
+
+    /// The service ID being streamed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = u16)]
+    pub service_id: Option<Sid>,
+
+    /// The event ID of the TV program being streamed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = u16)]
+    pub event_id: Option<Eid>,
+    // The following Mirakurun properties are not supported and always omitted:
+    // `noProvide`, `parseNIT`, `parseSDT` and `parseEIT`.
+}
+
+/// The `channel` property of a Mirakurun-compatible `StreamSetting`.
+///
+/// This mirrors the subset of a Mirakurun channel definition (a
+/// `ConfigChannelsItem`) that mirakc keeps for a channel.
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MirakurunStreamSettingChannel {
+    /// The name of the channel.
+    pub name: String,
+
+    #[serde(rename = "type")]
+    #[schema(value_type = ChannelType)]
+    pub channel_type: ChannelType,
+
+    /// The channel parameter passed to the tuner command.
+    pub channel: String,
+
+    /// TSMF relative TS number for CATV.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tsmf_rel_ts: Option<u8>,
+}
+
+impl From<EpgChannel> for MirakurunStreamSettingChannel {
+    fn from(ch: EpgChannel) -> Self {
+        Self {
+            name: ch.name,
+            channel_type: ch.channel_type,
+            channel: ch.channel,
+            tsmf_rel_ts: ch.tsmf_rel_ts,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -937,6 +1060,59 @@ mod tests {
         assert_eq!(TunerUserPriority::from(-129), (-128).into());
 
         assert!(TunerUserPriority::from(128).is_grab());
+    }
+
+    #[test]
+    fn test_mirakurun_tuner_user_stream_setting() {
+        let channel = channel_gr!("NHK", "27");
+        let user = TunerUser {
+            info: TunerUserInfo::Web {
+                id: "127.0.0.1:12345".to_string(),
+                agent: Some("test-agent".to_string()),
+            },
+            priority: 0.into(),
+            stream_setting: StreamSetting::for_program((1, 2, 3).into()),
+        };
+
+        let model = user.get_mirakurun_model(&channel);
+        let value = serde_json::to_value(&model).unwrap();
+
+        assert_eq!(value["id"], "127.0.0.1:12345");
+        assert_eq!(value["agent"], "test-agent");
+        assert_eq!(value["priority"], 0);
+        assert_eq!(value["streamSetting"]["channel"]["name"], "NHK");
+        assert_eq!(value["streamSetting"]["channel"]["type"], "GR");
+        assert_eq!(value["streamSetting"]["channel"]["channel"], "27");
+        assert_eq!(value["streamSetting"]["networkId"], 1);
+        assert_eq!(value["streamSetting"]["serviceId"], 2);
+        assert_eq!(value["streamSetting"]["eventId"], 3);
+        // Unsupported Mirakurun properties are omitted.
+        assert!(value["streamSetting"].get("parseEIT").is_none());
+        assert!(value["streamSetting"].get("noProvide").is_none());
+    }
+
+    #[test]
+    fn test_mirakurun_tuner_user_stream_setting_channel_only() {
+        // Channel passthrough: only the channel is known.
+        let channel = channel_bs4k!("BS4K", "0xB110");
+        let user = TunerUser {
+            info: TunerUserInfo::Job("scan-services".to_string()),
+            priority: (-1).into(),
+            stream_setting: StreamSetting::default(),
+        };
+
+        let model = user.get_mirakurun_model(&channel);
+        let value = serde_json::to_value(&model).unwrap();
+
+        assert_eq!(value["streamSetting"]["channel"]["name"], "BS4K");
+        assert_eq!(value["streamSetting"]["channel"]["type"], "BS4K");
+        assert_eq!(value["streamSetting"]["channel"]["channel"], "0xB110");
+        // Optional service/program identity is omitted when unknown.
+        assert!(value["streamSetting"].get("networkId").is_none());
+        assert!(value["streamSetting"].get("serviceId").is_none());
+        assert!(value["streamSetting"].get("eventId").is_none());
+        // `agent` is omitted when absent.
+        assert!(value.get("agent").is_none());
     }
 
     #[test]

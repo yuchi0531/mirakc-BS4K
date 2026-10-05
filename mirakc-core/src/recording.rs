@@ -50,6 +50,7 @@ use crate::models::ChannelType;
 use crate::models::ContentRange;
 use crate::models::ProgramId;
 use crate::models::ServiceId;
+use crate::models::StreamSetting;
 use crate::models::TunerUser;
 use crate::models::TunerUserInfo;
 use crate::mpeg_ts_stream::MpegTsStream;
@@ -1101,6 +1102,7 @@ where
                 user: TunerUser {
                     info: TunerUserInfo::Recorder(program_id),
                     priority: schedule.options.priority.into(),
+                    stream_setting: StreamSetting::for_program(program_id),
                 },
                 stream_id: None,
                 tuner: None,

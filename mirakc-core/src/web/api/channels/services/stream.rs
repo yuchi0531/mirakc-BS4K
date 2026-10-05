@@ -58,6 +58,7 @@ where
         &channel,
         path.sid,
         &user,
+        StreamSetting::for_sid(path.sid),
         &filter_setting,
     )
     .await

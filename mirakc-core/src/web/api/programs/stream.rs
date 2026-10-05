@@ -78,6 +78,11 @@ where
     ensure_program_level_supported(service.channel.channel_type)?;
     let clock = epg.call(epg::QueryClock { service_id }).await??;
 
+    let user = TunerUser {
+        stream_setting: StreamSetting::for_program(program_id),
+        ..user
+    };
+
     let stream = tuner_manager
         .call(tuner::StartStreaming {
             channel: service.channel.clone(),
@@ -291,6 +296,7 @@ mod tests {
                 agent: None,
             },
             priority: 0.into(),
+            stream_setting: Default::default(),
         };
         let filter_setting = FilterSetting {
             decode: true,

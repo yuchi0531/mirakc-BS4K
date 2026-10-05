@@ -234,7 +234,7 @@ fn build_headers(params: &StreamingHeaderParams) -> HeaderMap {
 
     headers.insert(
         super::X_MIRAKURUN_TUNER_USER_ID,
-        header_value!(params.user.get_mirakurun_model().id),
+        header_value!(params.user.mirakurun_id()),
     );
 
     if let Some(ref range) = params.range {
@@ -309,6 +309,7 @@ mod tests {
                 agent: None,
             },
             priority,
+            stream_setting: Default::default(),
         }
     }
 }

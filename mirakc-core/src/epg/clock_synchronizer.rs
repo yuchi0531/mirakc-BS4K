@@ -96,6 +96,7 @@ where
         let user = TunerUser {
             info: TunerUserInfo::Job(Self::LABEL.to_string()),
             priority: (-1).into(),
+            stream_setting: Default::default(),
         };
 
         let stream = tuner_manager
