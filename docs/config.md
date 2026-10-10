@@ -877,11 +877,14 @@ Definitions of tuners.  At least, one tuner must be defined.
 * decoded (optional)
   * PES packets are decoded by the tuner command
 * tlv-decoder (optional)
-  * A command that converts the MMT/TLV output of a `BS4K` tuner into MPEG-TS
+  * A command that converts the MMT/TLV output of a `BS4K` channel into MPEG-TS
   * It is run right after the tuner command, so the rest of the pipeline and
     the clients see ordinary MPEG-TS
   * The command must read from `stdin` and write TS packets to `stdout`
-  * When set, the TS-oriented builtin filters are applied to this tuner
+  * It is applied **only to `BS4K` channels**.  A tuner shared between `BS4K`
+    and other channel types (e.g. `types: [BS, BS4K]`) runs the decoder only
+    for `BS4K` channels; the other types are assumed to deliver MPEG-TS.
+  * When set, the TS-oriented builtin filters are applied to `BS4K` streams
     instead of being skipped
   * If empty (the default), the raw TLV is passed through as-is, like
     MMirakurun
