@@ -3724,6 +3724,7 @@ pub(crate) mod stub {
     #[derive(Clone, Default)]
     pub(crate) struct TunerManagerStub {
         expected_priority: Option<TunerUserPriority>,
+        tlv_decoded: bool,
     }
 
     impl TunerManagerStub {
@@ -3732,6 +3733,10 @@ pub(crate) mod stub {
                 expected_priority: test_config
                     .get("tuner_user_priority")
                     .map(|json| serde_json::from_str(json).unwrap()),
+                tlv_decoded: test_config
+                    .get("tlv_decoded")
+                    .map(|value| value == "true")
+                    .unwrap_or(false),
             }
         }
     }
@@ -3777,16 +3782,22 @@ pub(crate) mod stub {
             if msg.channel.channel == "ch" {
                 let (tx, stream) = BroadcasterStream::new_for_test();
                 let _ = tx.try_send(Bytes::from("0123456789"));
-                Ok(Ok(MpegTsStream::new(
-                    TunerSubscriptionId::default(),
-                    stream,
-                )))
+                let stream = MpegTsStream::new(TunerSubscriptionId::default(), stream);
+                let stream = if self.tlv_decoded {
+                    stream.tlv_decoded()
+                } else {
+                    stream
+                };
+                Ok(Ok(stream))
             } else {
                 let (_, stream) = BroadcasterStream::new_for_test();
-                Ok(Ok(MpegTsStream::new(
-                    TunerSubscriptionId::default(),
-                    stream,
-                )))
+                let stream = MpegTsStream::new(TunerSubscriptionId::default(), stream);
+                let stream = if self.tlv_decoded {
+                    stream.tlv_decoded()
+                } else {
+                    stream
+                };
+                Ok(Ok(stream))
             }
         }
     }

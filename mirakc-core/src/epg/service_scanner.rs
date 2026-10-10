@@ -48,13 +48,10 @@ where
         let mut results = Vec::new();
 
         for channel in self.config.channels.iter() {
-            // BS4K delivers a TLV stream; use the TLV variant so that the
-            // command receives TLV packets.  The arib fork guarantees that
-            // scan-services-tlv emits JSON compatible with TsService.
-            let command = jobs.command_for(channel.channel_type);
             let result = match Self::scan_services_in_channel(
                 channel,
-                command,
+                &jobs.command,
+                &jobs.command_bs4k,
                 jobs.timeout,
                 &self.tuner_manager,
                 ctx,
@@ -82,6 +79,7 @@ where
     async fn scan_services_in_channel<C: Spawn>(
         channel: &ChannelConfig,
         command: &str,
+        command_bs4k: &str,
         timeout: Duration,
         tuner_manager: &T,
         ctx: &C,
@@ -102,6 +100,17 @@ where
                 tuner: None,
             })
             .await??;
+
+        // Select the command according to the actual stream content.  A BS4K
+        // channel with a `tlv-decoder` is converted into MPEG-TS by the tuner
+        // pipeline, so the TS-based `command` (`mirakc-arib`) is used.  A BS4K
+        // channel without a `tlv-decoder` yields raw MMT/TLV and needs the
+        // TLV-based `command-bs4k` (`mirakc-arib-tlv`).
+        let command = if channel.channel_type == ChannelType::BS4K && !stream.is_tlv_decoded() {
+            command_bs4k
+        } else {
+            command
+        };
 
         let msg = StopStreaming { id: stream.id() };
         let stop_trigger = tuner_manager.trigger(msg);
@@ -216,6 +225,7 @@ mod tests {
         let result = ServiceScanner::scan_services_in_channel(
             &config.channels[0],
             &config.jobs.scan_services.command,
+            &config.jobs.scan_services.command_bs4k,
             config.jobs.scan_services.timeout,
             &stub,
             &ctx,
@@ -243,6 +253,7 @@ mod tests {
         let result = ServiceScanner::scan_services_in_channel(
             &config.channels[0],
             &config.jobs.scan_services.command,
+            &config.jobs.scan_services.command_bs4k,
             config.jobs.scan_services.timeout,
             &stub,
             &ctx,
@@ -271,6 +282,7 @@ mod tests {
         let result = ServiceScanner::scan_services_in_channel(
             &config.channels[0],
             &config.jobs.scan_services.command,
+            &config.jobs.scan_services.command_bs4k,
             config.jobs.scan_services.timeout,
             &stub,
             &ctx,
@@ -355,7 +367,8 @@ mod tests {
         assert_eq!(channel.channel_type, ChannelType::BS4K);
         let result = ServiceScanner::scan_services_in_channel(
             channel,
-            config.jobs.scan_services.command_for(channel.channel_type),
+            &config.jobs.scan_services.command,
+            &config.jobs.scan_services.command_bs4k,
             config.jobs.scan_services.timeout,
             &stub,
             &ctx,
@@ -386,7 +399,8 @@ mod tests {
         assert_eq!(channel.channel_type, ChannelType::GR);
         let result = ServiceScanner::scan_services_in_channel(
             channel,
-            config.jobs.scan_services.command_for(channel.channel_type),
+            &config.jobs.scan_services.command,
+            &config.jobs.scan_services.command_bs4k,
             config.jobs.scan_services.timeout,
             &stub,
             &ctx,
@@ -402,5 +416,59 @@ mod tests {
                 .command_for(ChannelType::BS4K)
                 .contains("mirakc-arib-tlv scan-services-tlv")
         );
+    }
+
+    #[test(tokio::test)]
+    async fn test_scan_services_in_channel_bs4k_tlv_decoded_uses_ts_command() {
+        let ctx = actlet::stubs::Context::default();
+
+        // Configure the stub so that the BS4K stream is converted into
+        // MPEG-TS by a `tlv-decoder`.
+        let stub = TunerManagerStub::new(&std::collections::HashMap::from([(
+            "tlv_decoded",
+            "true".to_string(),
+        )]));
+
+        let expected = vec![TsService {
+            nid: 4.into(),
+            tsid: 5.into(),
+            sid: 6.into(),
+            service_type: 1,
+            logo_id: -1,
+            remote_control_key_id: 0,
+            name: "bs4k-service".to_string(),
+        }];
+        // The TLV command fails while the TS command succeeds, proving that
+        // a tlv-decoded BS4K stream uses `command`.
+        let config_yml = format!(
+            r#"
+            channels:
+              - name: bs4k
+                type: BS4K
+                channel: '45168'
+            jobs:
+              scan-services:
+                command: echo '{}'
+                command-bs4k: false
+        "#,
+            serde_json::to_string(&expected).unwrap()
+        );
+        let config = Arc::new(serde_norway::from_str::<Config>(&config_yml).unwrap());
+        let channel = &config.channels[0];
+        assert_eq!(channel.channel_type, ChannelType::BS4K);
+        let result = ServiceScanner::scan_services_in_channel(
+            channel,
+            &config.jobs.scan_services.command,
+            &config.jobs.scan_services.command_bs4k,
+            config.jobs.scan_services.timeout,
+            &stub,
+            &ctx,
+        )
+        .await;
+        assert_matches!(result, Ok(services) => {
+            assert_eq!(services.len(), 1);
+            assert_eq!(services[0].name, "bs4k-service");
+            assert_eq!(services[0].id, ServiceId::new(4.into(), 6.into()));
+        });
     }
 }

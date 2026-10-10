@@ -198,17 +198,6 @@ where
         epg: &E,
         ctx: &C,
     ) -> Result<(), Error> {
-        // BS4K delivers MH-EIT over a TLV stream; use the MH variant.
-        // The arib fork normalizes table_ids to the TS-compatible range
-        // (MH 0x8B -> 0x50, basic 0x8C-0x93 -> 0x50-0x57,
-        // extended 0x94-0x9B -> 0x58-0x5F).  EitSection::is_valid()
-        // accepts the full 0x50-0x5F schedule range.  Timeout handling
-        // is shared with the 2K path.
-        let command = if channel.channel_type == ChannelType::BS4K {
-            command_bs4k
-        } else {
-            command
-        };
         tracing::debug!(channel.name, "Collecting EIT sections...");
 
         let user = TunerUser {
@@ -225,6 +214,22 @@ where
                 tuner: None,
             })
             .await??;
+
+        // Select the command according to the actual stream content.  A BS4K
+        // channel with a `tlv-decoder` is converted into MPEG-TS by the tuner
+        // pipeline, so the TS-based `command` (`mirakc-arib`) is used.  A BS4K
+        // channel without a `tlv-decoder` delivers MH-EIT over a raw MMT/TLV
+        // stream and needs the TLV-based `command-bs4k` (`mirakc-arib-tlv`).
+        // The arib fork normalizes table_ids to the TS-compatible range
+        // (MH 0x8B -> 0x50, basic 0x8C-0x93 -> 0x50-0x57,
+        // extended 0x94-0x9B -> 0x58-0x5F).  EitSection::is_valid()
+        // accepts the full 0x50-0x5F schedule range.  Timeout handling
+        // is shared with the 2K path.
+        let command = if channel.channel_type == ChannelType::BS4K && !stream.is_tlv_decoded() {
+            command_bs4k
+        } else {
+            command
+        };
 
         let msg = StopStreaming { id: stream.id() };
         let stop_trigger = tuner_manager.trigger(msg);
@@ -767,6 +772,78 @@ mod tests {
         epg_mock.0.expect_emit_flush_schedule().return_once(|_| {});
         let result = EitCollector::collect_eits_in_channel(
             &channel_gr!("channel", "0"),
+            &config.jobs.update_schedules.command,
+            &config.jobs.update_schedules.command_bs4k,
+            config.jobs.update_schedules.timeout,
+            &tuner_stub,
+            &epg_mock,
+            &ctx,
+        )
+        .await;
+        assert_matches!(result, Ok(()));
+    }
+
+    #[test(tokio::test)]
+    async fn test_collect_eits_in_channel_bs4k_tlv_decoded_uses_ts_command() {
+        let section = EitSection {
+            original_network_id: 4.into(),
+            transport_stream_id: 5.into(),
+            service_id: 6.into(),
+            table_id: 0x50,
+            section_number: 0,
+            last_section_number: 0,
+            segment_last_section_number: 0,
+            version_number: 0,
+            events: vec![],
+        };
+        let json = serde_json::to_string(&section).unwrap();
+
+        let ctx = actlet::stubs::Context::default();
+
+        // Configure the stub so that the BS4K stream is converted into
+        // MPEG-TS by a `tlv-decoder`.
+        let tuner_stub = TunerManagerStub::new(&std::collections::HashMap::from([(
+            "tlv_decoded",
+            "true".to_string(),
+        )]));
+
+        // The TLV command produces no output while the TS command emits a
+        // section, proving that a tlv-decoded BS4K stream uses `command`.
+        let config = Arc::new(
+            serde_norway::from_str::<Config>(&format!(
+                r#"
+            channels:
+              - name: bs4k
+                type: BS4K
+                channel: '45168'
+            jobs:
+              update-schedules:
+                command: >-
+                  echo '{json}'
+                command-bs4k: false
+        "#,
+            ))
+            .unwrap(),
+        );
+        let channel = channel!("bs4k", ChannelType::BS4K, "45168");
+        let mut epg_mock = MockEpg::new();
+        epg_mock
+            .0
+            .expect_emit_prepare_schedule()
+            .return_once(|msg| {
+                assert_eq!(msg.service_id, ServiceId::new(4.into(), 6.into()));
+            });
+        epg_mock
+            .0
+            .expect_emit_update_schedule()
+            .return_once(move |msg| {
+                assert_eq!(msg.section, section);
+            });
+        epg_mock.0.expect_emit_flush_schedule().return_once(|msg| {
+            assert_eq!(msg.service_id, ServiceId::new(4.into(), 6.into()));
+        });
+        let result = EitCollector::collect_eits_in_channel(
+            &channel,
             &config.jobs.update_schedules.command,
             &config.jobs.update_schedules.command_bs4k,
             config.jobs.update_schedules.timeout,
