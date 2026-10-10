@@ -1230,6 +1230,16 @@ Each job definition has the following properties:
   * A crontab expression of the job schedule
   * See https://crates.io/crates/cron for details of the format
 
+The command is selected dynamically from the actual stream content, not from
+the static channel type:
+
+* Non-BS4K channels always use `command`.
+* A BS4K channel with a `tlv-decoder` (see [tuners](#tuners)) is converted
+  into MPEG-TS by the tuner pipeline, so the decoded TS stream is passed to
+  `command` (e.g. `mirakc-arib ...`).
+* A BS4K channel without a `tlv-decoder` yields a raw MMT/TLV stream, which is
+  passed to `command-bs4k` (e.g. `mirakc-arib-tlv ...`).
+
 `command-bs4k` is needed only when at least one BS4K channel is defined in
 `channels`.  A configuration without BS4K channels is not required to install
 the BS4K-specific binary.  When a BS4K channel is defined, the program of
@@ -1254,9 +1264,11 @@ The command must read TS packets from `stdin`, and output the result to `stdout`
 in a specific JSON format.  See the help shown by `mirakc-arib scan-services -h`
 for details of the JSON format.
 
-For BS4K channels, the command must read decoded TLV packets from `stdin` and
-output the same JSON format.  See the help shown by
-`mirakc-arib-tlv scan-services-tlv -h` for details.
+For BS4K channels without a `tlv-decoder`, the command must read raw MMT/TLV
+packets from `stdin` and output the same JSON format.  See the help shown by
+`mirakc-arib-tlv scan-services-tlv -h` for details.  When a `tlv-decoder` is
+configured for the BS4K channel, the stream is MPEG-TS and `command` is used
+instead.
 
 Command template variables:
 
@@ -1288,9 +1300,11 @@ The command must read TS packets from `stdin`, and output the result to `stdout`
 in a specific JSON format.  See the help shown by `mirakc-arib collect-eits -h`
 for details of the JSON format.
 
-For BS4K channels, the command must read decoded TLV packets from `stdin` and
-output MH-EIT sections in the same JSON format.  See the help shown by
-`mirakc-arib-tlv collect-mh-eits -h` for details.
+For BS4K channels without a `tlv-decoder`, the command must read raw MMT/TLV
+packets from `stdin` and output MH-EIT sections in the same JSON format.  See
+the help shown by `mirakc-arib-tlv collect-mh-eits -h` for details.  When a
+`tlv-decoder` is configured for the BS4K channel, the stream is MPEG-TS and
+`command` is used instead.
 
 The default BS4K command includes `--time-limit=90`.  `collect-mh-eits` reads
 a live pipe until it exits, and mirakc kills it at the job timeout (`10m` by
