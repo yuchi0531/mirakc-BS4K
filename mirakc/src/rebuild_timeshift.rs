@@ -231,6 +231,7 @@ fn create_config(config: &config::Config, cl: &CommandLine, script: &Path) -> Ar
             models::ChannelType::BS,
             models::ChannelType::CS,
             models::ChannelType::SKY,
+            models::ChannelType::CATV,
         ],
         command: format!("sh -x {}", script.display()),
         decoded: true,

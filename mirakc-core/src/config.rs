@@ -3101,13 +3101,14 @@ mod tests {
             ChannelType::CS,
             ChannelType::SKY,
             ChannelType::BS4K,
+            ChannelType::CATV,
         ];
         config.command = "cat /dev/null".to_string();
         assert_eq!(
             serde_norway::from_str::<TunerConfig>(
                 r#"
                 name: x
-                types: [GR, BS, CS, SKY, BS4K]
+                types: [GR, BS, CS, SKY, BS4K, CATV]
                 command: cat /dev/null
             "#
             )

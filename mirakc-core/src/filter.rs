@@ -195,6 +195,8 @@ mod tests {
         assert!(!is_tlv_passthrough(ChannelType::BS));
         assert!(!is_tlv_passthrough(ChannelType::CS));
         assert!(!is_tlv_passthrough(ChannelType::SKY));
+        // CATV is an MPEG-TS channel type, not TLV.
+        assert!(!is_tlv_passthrough(ChannelType::CATV));
     }
 
     #[test]
@@ -209,6 +211,8 @@ mod tests {
         assert!(ensure_program_level_supported(ChannelType::BS).is_ok());
         assert!(ensure_program_level_supported(ChannelType::CS).is_ok());
         assert!(ensure_program_level_supported(ChannelType::SKY).is_ok());
+        // CATV supports program-level operations like other MPEG-TS types.
+        assert!(ensure_program_level_supported(ChannelType::CATV).is_ok());
     }
 
     #[test]

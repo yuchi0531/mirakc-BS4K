@@ -569,6 +569,8 @@ mod tests {
         assert!(!should_skip_onair_tracking(ChannelType::BS));
         assert!(!should_skip_onair_tracking(ChannelType::CS));
         assert!(!should_skip_onair_tracking(ChannelType::SKY));
+        // CATV is MPEG-TS, so on-air tracking works as for other TS types.
+        assert!(!should_skip_onair_tracking(ChannelType::CATV));
     }
 
     #[test]

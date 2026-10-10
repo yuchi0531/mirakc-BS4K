@@ -28,6 +28,13 @@ pub enum ChannelType {
     CS,
     SKY,
     BS4K,
+    /// CATV (cable television).
+    ///
+    /// Uses the same MPEG-TS pipeline as `GR`/`BS`/`CS`/`SKY`.  A CATV channel
+    /// is typically a retransmission of a ground/satellite channel and can be
+    /// tuned via a dedicated tuner (see `channels[].routes` and
+    /// `channels[].tsmf-rel-ts`).
+    CATV,
 }
 
 impl fmt::Display for ChannelType {
@@ -38,6 +45,7 @@ impl fmt::Display for ChannelType {
             ChannelType::CS => write!(f, "CS"),
             ChannelType::SKY => write!(f, "SKY"),
             ChannelType::BS4K => write!(f, "BS4K"),
+            ChannelType::CATV => write!(f, "CATV"),
         }
     }
 }
@@ -1039,16 +1047,23 @@ mod tests {
         );
 
         assert_eq!(
-            serde_json::from_str::<Vec<ChannelType>>(r#"["GR", "BS", "CS", "SKY", "BS4K"]"#)
-                .unwrap(),
+            serde_json::from_str::<Vec<ChannelType>>(
+                r#"["GR", "BS", "CS", "SKY", "BS4K", "CATV"]"#
+            )
+            .unwrap(),
             vec![
                 ChannelType::GR,
                 ChannelType::BS,
                 ChannelType::CS,
                 ChannelType::SKY,
                 ChannelType::BS4K,
+                ChannelType::CATV,
             ]
         );
+
+        // `Display` round-trips with the JSON representation.
+        assert_eq!(ChannelType::CATV.to_string(), "CATV");
+        assert_eq!(ChannelType::BS4K.to_string(), "BS4K");
     }
 
     #[test]
