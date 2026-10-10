@@ -435,7 +435,7 @@ Definitions of channels.  At least, one channel must be defined.
 * name
   * An arbitrary name of the channel
 * type
-  * One of channel types in `GR`, `BS`, `CS`, `SKY` and `BS4K`
+  * One of channel types in `GR`, `BS`, `CS`, `SKY`, `BS4K` and `CATV`
 * channel
   * A channel parameter used in a tuner command template
   * An opaque string passed to the tuner command as-is.  In addition to a
@@ -599,6 +599,42 @@ type = "BS4K"
 channel = "45280"
 services = [ 102 ]
 disabled = true
+```
+
+### CATV
+
+CATV (cable television) channels use the same MPEG-TS pipeline as `GR`, `BS`,
+`CS` and `SKY`.  A CATV channel is usually a retransmission of a ground or
+satellite channel, received via a dedicated tuner.
+
+* `channel` is passed to the tuner command as `{{{channel}}}`.  Any non-empty
+  string is accepted, including CATV-style names such as `'C17'`.
+* To receive the same service both via CATV and a local tuner, use
+  `channels[].routes` to list the tuners in the order they are tried.
+* For TSMF (MPEG-TS Multi Frame) retransmission, set `channels[].tsmf-rel-ts`
+  to extract the relative TS stream.
+* No dedicated job commands are provided.  `jobs.*.command` is used for CATV
+  like the other MPEG-TS channel types.
+
+```yaml
+# YAML
+channels:
+  - name: CATV-TBS
+    type: CATV
+    channel: 'C17'
+    routes:
+      - tuner: catv
+```
+
+```toml
+# TOML
+[[channels]]
+name = "CATV-TBS"
+type = "CATV"
+channel = "C17"
+
+[[channels.routes]]
+tuner = "catv"
 ```
 
 Definitions with the same `type` and `channel` will be merged.  For example, the

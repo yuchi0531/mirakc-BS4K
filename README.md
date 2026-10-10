@@ -14,6 +14,7 @@
   - tunerパイプライン直後に`filters.tsmf-filter`(`mirakc-arib filter-tsmf --relative-ts=...`)を挿入し、ストリーミング/EPGジョブ/録画の全消費者に適用
   - 抽出コマンドは[mirakc-arib fork](https://github.com/yuchi0531/mirakc-arib)に`filter-tsmf`として実装
 - tunerコマンドのテンプレート変数でMirakurun互換の山括弧記法`<channel>`/`<type>`に対応(従来のMustache `{{{channel}}}`/`{{{channel_type}}}`も併用可)
+- チャンネル種別に`CATV`を追加(MPEG-TSとしてGR/BS/CS/SKYと同じ扱い。`tsmf-rel-ts`や`routes`と併用)
 - `GET /api/tuners`のユーザー情報にMirakurun互換の`streamSetting`を追加(channel/networkId/serviceId/eventId)
 - チャンネル番号に数字だけでなく`C17`のような英数字(CATV形式)も指定可能に。BS4Kの`channel`形式チェックも緩和し、任意の非空文字列を受け付け
 
