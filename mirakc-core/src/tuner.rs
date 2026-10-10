@@ -5,9 +5,11 @@ use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering;
 
 use actlet::prelude::*;
+use tokio::io::AsyncRead;
 
 use crate::broadcaster::*;
 use crate::command_util::CommandPipeline;
+use crate::command_util::CommandPipelineOutput;
 use crate::command_util::spawn_pipeline;
 use crate::config::Config;
 use crate::config::ExcludedChannelConfig;
@@ -183,7 +185,7 @@ impl TunerManager {
                 self.event_emitters
                     .emit(Event::StatusChanged(tuner.index))
                     .await;
-                return Ok(tuner.subscribe(user));
+                return Ok(tuner.subscribe(user, channel));
             }
             tracing::error!(tuner.index, %channel, %user.info, stream.id = %stream_id, "Specified tuner is unavailable");
             return Err(Error::TunerUnavailable);
@@ -203,7 +205,7 @@ impl TunerManager {
             self.event_emitters
                 .emit(Event::StatusChanged(tuner.index))
                 .await;
-            return Ok(tuner.subscribe(user));
+            return Ok(tuner.subscribe(user, channel));
         }
 
         let found = self
@@ -216,7 +218,7 @@ impl TunerManager {
             self.event_emitters
                 .emit(Event::StatusChanged(tuner.index))
                 .await;
-            return Ok(tuner.subscribe(user));
+            return Ok(tuner.subscribe(user, channel));
         }
 
         let found = self
@@ -232,7 +234,7 @@ impl TunerManager {
             self.event_emitters
                 .emit(Event::StatusChanged(tuner.index))
                 .await;
-            return Ok(tuner.subscribe(user));
+            return Ok(tuner.subscribe(user, channel));
         }
 
         // No available tuner at this point.
@@ -253,7 +255,7 @@ impl TunerManager {
                 .emit(Event::StatusChanged(tuner.index))
                 .await;
             tuner.activate(channel, filters, ctx).await?;
-            return Ok(tuner.subscribe(user));
+            return Ok(tuner.subscribe(user, channel));
         }
 
         tracing::warn!(%channel, %user.info, %user.priority, "No tuner available");
@@ -672,7 +674,7 @@ impl Tuner {
                 channel,
                 TunerPipelineCommands {
                     command,
-                    tlv_decoder: self.tlv_decoder_command(),
+                    tlv_decoder: self.tlv_decoder_command(channel),
                 },
                 filters,
                 self.time_limit,
@@ -682,8 +684,13 @@ impl Tuner {
     }
 
     /// The `tlv-decoder` command to insert into the pipeline, if configured.
-    fn tlv_decoder_command(&self) -> Option<String> {
-        if self.tlv_decoder.is_empty() {
+    ///
+    /// The command is only applied to BS4K channels.  A tuner shared between
+    /// BS4K and other channel types (e.g. `types: [BS, BS4K]`) delivers
+    /// MPEG-TS for the non-BS4K types, so a TLV-to-TS decoder must not run for
+    /// them.
+    fn tlv_decoder_command(&self, channel: &EpgChannel) -> Option<String> {
+        if self.tlv_decoder.is_empty() || channel.channel_type != ChannelType::BS4K {
             None
         } else {
             Some(self.tlv_decoder.clone())
@@ -693,122 +700,14 @@ impl Tuner {
         self.activity.deactivate();
     }
 
-    fn subscribe(&mut self, user: &TunerUser) -> TunerSubscription {
+    fn subscribe(&mut self, user: &TunerUser, channel: &EpgChannel) -> TunerSubscription {
         let mut subscription = self.activity.subscribe(user);
         subscription.decoded = self.decoded;
-        subscription.tlv_decoded = !self.tlv_decoder.is_empty();
-        subscription
-    }
-
-    async fn stop_streaming(
-        &mut self,
-        id: TunerSubscriptionId,
-    ) -> Result<Option<TunerUser>, Error> {
-        self.activity.unsubscript(id).await
-    }
-
-    fn get_mirakurun_model(&self) -> MirakurunTuner {
-        let (command, pid, users) = self.activity.get_mirakurun_models();
-
-        MirakurunTuner {
-            index: self.index,
-            name: self.name.clone(),
-            channel_types: self.channel_types.clone(),
-            command,
-            pid,
-            users,
-            is_available: true,
-            is_remote: false,
-            is_free: self.is_available(),
-            is_using: !self.is_available(),
-            is_fault: false,
-        }
-    }
-
-    fn make_command(&self, channel: &EpgChannel) -> Result<String, Error> {
-        let template = mustache::compile_str(&self.command)?;
-        let data = mustache::MapBuilder::new()
-            .insert("channel_type", &channel.channel_type)?
-            .insert_str("channel", &channel.channel)
-            .insert_str("extra_args", &channel.extra_args)
-            .insert_str("duration", "-")
-            .build();
-        Ok(template.render_data_to_string(&data)?)
-    }
-}
-
-#[derive(Debug, Eq, PartialEq)]
-struct TunerPriority {
-    highest_user_priority: TunerUserPriority,
-    num_users: usize,
-}
-
-impl Ord for TunerPriority {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        if self.highest_user_priority != other.highest_user_priority {
-            return self.highest_user_priority.cmp(&other.highest_user_priority);
-        }
-        self.num_users.cmp(&other.num_users)
-    }
-}
-
-impl PartialOrd for TunerPriority {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-// activity
-
-enum TunerActivity {
-    Inactive,
-    Active(Box<TunerSession>),
-}
-
-/// The commands that make up the head of a tuner pipeline.
-///
-/// `tlv_decoder` is inserted right after `command` so that the rest of the
-/// pipeline and the clients see MPEG-TS even when the tuner emits MMT/TLV.
-/// The two are kept together to avoid threading a long list of related
-/// parameters through the activation chain.
-struct TunerPipelineCommands {
-    command: String,
-    tlv_decoder: Option<String>,
-}
-
-impl TunerActivity {
-    async fn activate<C>(
-        &mut self,
-        tuner_index: usize,
-        channel: &EpgChannel,
-        commands: TunerPipelineCommands,
-        filters: Vec<String>,
-        time_limit: u64,
-        ctx: &C,
-    ) -> Result<(), Error>
-    where
-        C: Spawn,
-    {
-        match self {
-            Self::Inactive => {
-                let session =
-                    TunerSession::new(tuner_index, channel, commands, filters, time_limit, ctx)
-                        .await?;
-                *self = Self::Active(Box::new(session));
-                Ok(())
-            }
-            Self::Active(_) => panic!("Must be deactivated before activating"),
-        }
-    }
-
-    fn deactivate(&mut self) {
-        self.activity.deactivate();
-    }
-
-    fn subscribe(&mut self, user: &TunerUser) -> TunerSubscription {
-        let mut subscription = self.activity.subscribe(user);
-        subscription.decoded = self.decoded;
-        subscription.tlv_decoded = !self.tlv_decoder.is_empty();
+        // The tlv-decoder runs only for BS4K channels (see
+        // `tlv_decoder_command`), so a stream is only marked as converted to
+        // MPEG-TS when a BS4K channel is streamed.
+        subscription.tlv_decoded =
+            !self.tlv_decoder.is_empty() && channel.channel_type == ChannelType::BS4K;
         subscription
     }
 
@@ -1681,13 +1580,16 @@ mod tests {
             assert!(result.is_ok());
             assert!(!tuner.is_subscribed(&dummy_id));
 
-            let subscription = tuner.subscribe(&TunerUser {
-                info: TunerUserInfo::Web {
-                    id: "".to_string(),
-                    agent: None,
+            let subscription = tuner.subscribe(
+                &TunerUser {
+                    info: TunerUserInfo::Web {
+                        id: "".to_string(),
+                        agent: None,
+                    },
+                    priority: 0.into(),
                 },
-                priority: 0.into(),
-            });
+                &create_channel("1"),
+            );
             assert!(tuner.is_subscribed(&subscription.id));
 
             let result = tuner.stop_streaming(subscription.id).await;
@@ -1766,13 +1668,16 @@ mod tests {
 
             let result = tuner.activate(&create_channel("1"), vec![], &system).await;
             assert!(result.is_ok());
-            let subscription = tuner.subscribe(&TunerUser {
-                info: TunerUserInfo::Web {
-                    id: "".to_string(),
-                    agent: None,
+            let subscription = tuner.subscribe(
+                &TunerUser {
+                    info: TunerUserInfo::Web {
+                        id: "".to_string(),
+                        agent: None,
+                    },
+                    priority: 0.into(),
                 },
-                priority: 0.into(),
-            });
+                &create_channel("1"),
+            );
 
             let result = tuner.stop_streaming(Default::default()).await;
             assert_matches!(result, Err(Error::SessionNotFound));
@@ -1799,21 +1704,21 @@ mod tests {
                 .activate(&create_channel("1"), vec![], &system)
                 .await
                 .unwrap();
-            tuner.subscribe(&create_user(0.into()));
+            tuner.subscribe(&create_user(0.into()), &create_channel("1"));
 
             assert!(!tuner.can_grab(0.into()));
             assert!(tuner.can_grab(1.into()));
             assert!(tuner.can_grab(2.into()));
             assert!(tuner.can_grab(TunerUserPriority::GRAB));
 
-            tuner.subscribe(&create_user(1.into()));
+            tuner.subscribe(&create_user(1.into()), &create_channel("1"));
 
             assert!(!tuner.can_grab(0.into()));
             assert!(!tuner.can_grab(1.into()));
             assert!(tuner.can_grab(2.into()));
             assert!(tuner.can_grab(TunerUserPriority::GRAB));
 
-            tuner.subscribe(&create_user(TunerUserPriority::GRAB));
+            tuner.subscribe(&create_user(TunerUserPriority::GRAB), &create_channel("1"));
 
             assert!(!tuner.can_grab(0.into()));
             assert!(!tuner.can_grab(1.into()));
@@ -1838,19 +1743,19 @@ mod tests {
                 .await
                 .unwrap();
 
-            tuner.subscribe(&create_user(0.into()));
+            tuner.subscribe(&create_user(0.into()), &create_channel("1"));
             assert_matches!(tuner.priority(), Some(prio) => {
                 assert_eq!(prio.highest_user_priority, 0.into());
                 assert_eq!(prio.num_users, 1);
             });
 
-            tuner.subscribe(&create_user(10.into()));
+            tuner.subscribe(&create_user(10.into()), &create_channel("1"));
             assert_matches!(tuner.priority(), Some(prio) => {
                 assert_eq!(prio.highest_user_priority, 10.into());
                 assert_eq!(prio.num_users, 2);
             });
 
-            tuner.subscribe(&create_user(5.into()));
+            tuner.subscribe(&create_user(5.into()), &create_channel("1"));
             assert_matches!(tuner.priority(), Some(prio) => {
                 assert_eq!(prio.highest_user_priority, 10.into());
                 assert_eq!(prio.num_users, 3);
@@ -1948,7 +1853,6 @@ mod tests {
                     channel: channel_bs4k!("name", "0xB110"),
                     user: create_user(0.into()),
                     stream_id: None,
-                    tuner: None,
                 })
                 .await;
             let mut stream = assert_matches!(result, Ok(Ok(stream)) => stream);
@@ -1991,7 +1895,6 @@ mod tests {
                     channel: channel_bs4k!("name", "0xB110"),
                     user: create_user(0.into()),
                     stream_id: None,
-                    tuner: None,
                 })
                 .await;
             let mut stream = assert_matches!(result, Ok(Ok(stream)) => stream);
@@ -2003,6 +1906,86 @@ mod tests {
             });
 
             assert!(!stream.is_tlv_decoded());
+        }
+        system.shutdown().await;
+    }
+
+    #[test(tokio::test)]
+    async fn test_tlv_decoder_applies_only_to_bs4k() {
+        // A tuner shared between BS4K and other channel types must run the
+        // tlv-decoder only for BS4K channels.  For the others the tuner output
+        // is already MPEG-TS and must pass through untouched.
+        let system = System::new();
+
+        {
+            let config: Arc<Config> = Arc::new(
+                serde_norway::from_str(
+                    r#"
+                tuners:
+                  - name: shared
+                    types: [BS, BS4K]
+                    command: >-
+                      printf tlv
+                    tlv-decoder: >-
+                      tr a-z A-Z
+                "#,
+                )
+                .unwrap(),
+            );
+
+            let manager = system.spawn_actor(TunerManager::new(config)).await;
+
+            // A non-BS4K channel skips the tlv-decoder.
+            let result = manager
+                .call(StartStreaming {
+                    channel: channel!("name", ChannelType::BS, "BS15_0"),
+                    user: create_user(0.into()),
+                    stream_id: None,
+                })
+                .await;
+            let mut stream = assert_matches!(result, Ok(Ok(stream)) => stream);
+            let data = stream.next().await;
+            assert_matches!(data, Some(Ok(chunk)) => {
+                assert_eq!(chunk.as_ref(), b"tlv");
+            });
+            assert!(!stream.is_tlv_decoded());
+        }
+        system.shutdown().await;
+
+        // A fresh system for the BS4K channel.
+        let system = System::new();
+        {
+            let config: Arc<Config> = Arc::new(
+                serde_norway::from_str(
+                    r#"
+                tuners:
+                  - name: shared
+                    types: [BS, BS4K]
+                    command: >-
+                      printf TLV
+                    tlv-decoder: >-
+                      tr A-Z a-z
+                "#,
+                )
+                .unwrap(),
+            );
+
+            let manager = system.spawn_actor(TunerManager::new(config)).await;
+
+            // A BS4K channel runs the tlv-decoder.
+            let result = manager
+                .call(StartStreaming {
+                    channel: channel_bs4k!("name", "0xB110"),
+                    user: create_user(0.into()),
+                    stream_id: None,
+                })
+                .await;
+            let mut stream = assert_matches!(result, Ok(Ok(stream)) => stream);
+            let data = stream.next().await;
+            assert_matches!(data, Some(Ok(chunk)) => {
+                assert_eq!(chunk.as_ref(), b"tlv");
+            });
+            assert!(stream.is_tlv_decoded());
         }
         system.shutdown().await;
     }
