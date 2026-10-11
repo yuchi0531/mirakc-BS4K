@@ -768,6 +768,15 @@ is useful when the same TS is available from multiple paths, for example from a
 CATV tuner and a local tuner, and for falling back to another path when one of
 them fails to start.
 
+`routes` is independent of the channel type.  Any channel type (`GR`, `BS`,
+`CS`, `SKY`, `BS4K` and `CATV`) can carry `routes`.  Because only the tuners
+listed in `routes` are considered for such a channel, `routes` is also useful
+for integrating an out-of-region feed received through a remote tuner (e.g. an
+upstream Mirakurun-compatible server) without the risk of the feed being
+requested from a local tuner, or vice versa.  A remote tuner can be defined with
+an upstream-as-tuner command such as
+`curl -sG http://remote:40772/api/channels/{{{channel_type}}}/{{{channel}}}/stream?decode=0`.
+
 A channel without `routes` keeps the legacy behavior: mirakc selects a tuner
 from all defined tuners.
 

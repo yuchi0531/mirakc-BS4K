@@ -2,13 +2,17 @@
 自分の環境で使うための自家用フォークです。主にBS4K,CATVに関する変更をしています。
 
 ## 現在の主な変更点
+- `routes`はチャンネル種別に依存しない汎用機能(CATV専用ではない)で、**県外波(リモートチューナー)の統合**にも利用できる
+  - `routes`を持つチャンネルは列挙したチューナーしか検討されないため、県内⇔県外のチューナー取り違えを原理的に排除できる
+  - 県外波の`type`は`GR`でも`CATV`でも可(同一`(type, channel)`はマージされるため、県内と番号が被るなら別ラベルか`CATV`を使う)
+  - 県外チューナーはupstream-as-tuner方式、デコードはチューナー毎の`decoded`+グローバル`filters.decode-filter`で対応。詳細は[docs/config.md](./docs/config.md)参照
 - mirakc-arib-tlvによりbs4kのmmt/tlv対応
   - [mirakc-arib-tlv](https://github.com/yuchi0531/mirakc-arib-tlv)を利用し、デコード済みTLVをパススルー配信(復号は外部のデコード済みTLVサーバ前提)
   - BS4K向けEPGジョブ(`command-bs4k`: `scan-services-tlv`/`collect-mh-eits`)に対応。このリポジトリでビルドしたDockerイメージ(debian/alpine)にも同梱
     - BS4KチャンネルのEPGジョブは実際のストリームに応じてコマンドを選択する。`tlv-decoder`設定時はMPEG-TSになるため`mirakc-arib`(`command`)、未設定時は生MMT/TLVのため`mirakc-arib-tlv`(`command-bs4k`)を使用する
   - tunersに`tlv-decoder`項目を追加。dantto4k等をtunerのパイプラインに挿入することでTLVをTSに変換し、BS4Kをchannel/serviceのTSとして配信できる(未指定時は従来通りTLVパススルー。program-level配信/録画は非対応のまま)
     - `tlv-decoder`はBS4Kチャンネルのみに適用(BS4Kと他種別を共有するtunerでも他種別はMPEG-TSのまま素通し)
-- channels.ymlにroutesフィールドを追加しcatvなど別経路で同じ放送波が受信できる場合に対応(Inspired by [Mahiron](https://github.com/rokoucha/Mahiron))
+- channels.ymlにroutesフィールドを追加し、同じ放送波を別経路(例: CATV経由とローカルチューナー、県外波のリモートチューナー)で受信できる場合に対応(チャンネル種別に依存しない汎用機能。Inspired by [Mahiron](https://github.com/rokoucha/Mahiron))
   - 起動失敗時のみ次の経路へフォールバック
 - `X-Mirakc-Tuner`ヘッダでクライアント指定のチューナーに固定(channel streamのみ、routesを無視して厳密固定、未知名は400)
 - channels.ymlに`tsmf-rel-ts`フィールドを追加(Mirakurun互換。別名`tsmfRelTs`も可)
