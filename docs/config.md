@@ -893,8 +893,10 @@ Definitions of tuners.  At least, one tuner must be defined.
   * It is applied **only to `BS4K` channels**.  A tuner shared between `BS4K`
     and other channel types (e.g. `types: [BS, BS4K]`) runs the decoder only
     for `BS4K` channels; the other types are assumed to deliver MPEG-TS.
-  * When set, the TS-oriented builtin filters are applied to `BS4K` streams
-    instead of being skipped
+  * A `tlv-decoder` merely converts TLV into MPEG-TS; it does **not** enable the
+    TS-oriented builtin filters.  `BS4K` channel/service streams are always
+    passthrough (no TS service/decode filters) because `BS4K` is 1 TLV = 1
+    service
   * If empty (the default), the raw TLV is passed through as-is, like
     MMirakurun
   * Note that program-level streaming and recording remain unsupported for
