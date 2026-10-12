@@ -377,6 +377,17 @@ impl TunerManager {
                 continue;
             }
 
+            if !tuner.is_supported_type(&effective) {
+                tracing::warn!(
+                    route.index = route_index,
+                    tuner.index = tuner.index,
+                    tuner.name = %tuner.name,
+                    %effective,
+                    "Route tuner does not support the channel type, skipping"
+                );
+                continue;
+            }
+
             // (a) Use a tuner reserved for the user.
             if tuner.is_reserved_for(user) {
                 tracing::debug!(
@@ -536,6 +547,20 @@ impl TunerManager {
                 "Pinned tuner is excluded for the channel"
             );
             return Err(Error::TunerUnavailable);
+        }
+
+        if !tuner.is_supported_type(channel) {
+            tracing::warn!(
+                tuner.index = tuner.index,
+                tuner.name = %tuner.name,
+                %channel,
+                %user.info,
+                "Pinned tuner does not support the channel type"
+            );
+            return Err(Error::InvalidRequest(format!(
+                "Tuner '{}' does not support channel type {}",
+                tuner.name, channel.channel_type
+            )));
         }
 
         // (a) Use the tuner reserved for the user.
@@ -2671,6 +2696,165 @@ mod tests {
                 .await;
             assert_matches!(result, Ok(Ok(stream)) => {
                 assert_eq!(stream.id().session_id.tuner_index, 1);
+            });
+        }
+        system.shutdown().await;
+    }
+
+    #[test(tokio::test)]
+    async fn test_routes_unsupported_tuner_type_skipped() {
+        // A route pointing at a tuner that does not support the channel type
+        // must be skipped instead of activating a wrong-type tuner.
+        let system = System::new();
+        {
+            let config: Arc<Config> = Arc::new(
+                serde_norway::from_str(
+                    r#"
+                channels:
+                  - name: test
+                    type: GR
+                    channel: 0
+                    routes:
+                      - tuner: bs_tuner
+                tuners:
+                  - name: bs_tuner
+                    types: [BS]
+                    command: "sleep 3"
+                  - name: gr_tuner
+                    types: [GR]
+                    command: "sleep 3"
+                "#,
+                )
+                .unwrap(),
+            );
+
+            let manager = system.spawn_actor(TunerManager::new(config)).await;
+
+            // The only route is unsupported, so no tuner is activated even
+            // though a compatible GR tuner is defined.
+            let result = manager
+                .call(StartStreaming {
+                    channel: create_channel("0"),
+                    user: create_user(0.into()),
+                    stream_id: None,
+                    tuner: None,
+                })
+                .await;
+            assert_matches!(result, Ok(Err(Error::TunerUnavailable)));
+        }
+        system.shutdown().await;
+
+        // With the compatible GR tuner appended to the routes, the BS tuner is
+        // skipped and the GR tuner is used.
+        let system = System::new();
+        {
+            let config: Arc<Config> = Arc::new(
+                serde_norway::from_str(
+                    r#"
+                channels:
+                  - name: test
+                    type: GR
+                    channel: 0
+                    routes:
+                      - tuner: bs_tuner
+                      - tuner: gr_tuner
+                tuners:
+                  - name: bs_tuner
+                    types: [BS]
+                    command: "sleep 3"
+                  - name: gr_tuner
+                    types: [GR]
+                    command: "sleep 3"
+                "#,
+                )
+                .unwrap(),
+            );
+
+            let manager = system.spawn_actor(TunerManager::new(config)).await;
+
+            let result = manager
+                .call(StartStreaming {
+                    channel: create_channel("0"),
+                    user: create_user(0.into()),
+                    stream_id: None,
+                    tuner: None,
+                })
+                .await;
+            assert_matches!(result, Ok(Ok(stream)) => {
+                assert_eq!(stream.id().session_id.tuner_index, 1);
+            });
+        }
+        system.shutdown().await;
+    }
+
+    #[test(tokio::test)]
+    async fn test_pinned_unsupported_tuner_type_rejected() {
+        // A pinned tuner that does not support the channel type is rejected
+        // with `InvalidRequest` instead of being activated.
+        let system = System::new();
+        {
+            let config: Arc<Config> = Arc::new(
+                serde_norway::from_str(
+                    r#"
+                tuners:
+                  - name: bs_tuner
+                    types: [BS]
+                    command: "sleep 3"
+                "#,
+                )
+                .unwrap(),
+            );
+
+            let manager = system.spawn_actor(TunerManager::new(config)).await;
+
+            let result = manager
+                .call(StartStreaming {
+                    channel: create_channel("0"),
+                    user: create_user(0.into()),
+                    stream_id: None,
+                    tuner: Some("bs_tuner".to_string()),
+                })
+                .await;
+            assert_matches!(result, Ok(Err(Error::InvalidRequest(_))));
+        }
+        system.shutdown().await;
+    }
+
+    #[test(tokio::test)]
+    async fn test_routes_supported_tuner_type_still_works() {
+        // A route pointing at a compatible tuner keeps working.
+        let system = System::new();
+        {
+            let config: Arc<Config> = Arc::new(
+                serde_norway::from_str(
+                    r#"
+                channels:
+                  - name: test
+                    type: GR
+                    channel: 0
+                    routes:
+                      - tuner: gr_tuner
+                tuners:
+                  - name: gr_tuner
+                    types: [GR]
+                    command: "sleep 3"
+                "#,
+                )
+                .unwrap(),
+            );
+
+            let manager = system.spawn_actor(TunerManager::new(config)).await;
+
+            let result = manager
+                .call(StartStreaming {
+                    channel: create_channel("0"),
+                    user: create_user(0.into()),
+                    stream_id: None,
+                    tuner: None,
+                })
+                .await;
+            assert_matches!(result, Ok(Ok(stream)) => {
+                assert_eq!(stream.id().session_id.tuner_index, 0);
             });
         }
         system.shutdown().await;

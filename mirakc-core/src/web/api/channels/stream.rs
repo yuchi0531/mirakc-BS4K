@@ -1,6 +1,7 @@
 use super::*;
 
 use crate::epg::EpgChannel;
+use crate::filter::is_tlv_passthrough;
 use crate::web::api::stream::StreamingHeaderParams;
 use crate::web::api::stream::do_head_stream;
 use crate::web::api::stream::streaming;
@@ -75,7 +76,6 @@ where
         &filter_setting,
         &channel,
         stream.is_decoded(),
-        stream.is_tlv_decoded(),
     )?;
     debug_assert!(!seekable);
 
@@ -137,7 +137,6 @@ where
         &filter_setting,
         &channel,
         false, // This is a dummy but works properly.
-        false, // ditto; HEAD does not open a tuner.
     )?;
     debug_assert!(!seekable);
 
@@ -161,7 +160,6 @@ fn build_filters(
     filter_setting: &FilterSetting,
     channel: &EpgChannel,
     decoded: bool,
-    tlv_decoded: bool,
 ) -> Result<(Vec<String>, String, bool), Error> {
     let data = mustache::MapBuilder::new()
         .insert_str("channel_name", &channel.name)
@@ -172,13 +170,55 @@ fn build_filters(
 
     let mut builder = FilterPipelineBuilder::new(data, false); // not seekable
     builder.add_pre_filters(&config.pre_filters, &filter_setting.pre_filters)?;
-    // BS4K delivers MMT/TLV from the tuner.  Unless the tuner converted it into
-    // MPEG-TS with a `tlv-decoder` command, the stream is still TLV and the
-    // TS-only mirakc-arib decode-filter must not touch it.  Content-Type stays
-    // `video/MP2T` for Mirakurun-client compatibility either way.
-    if !tlv_decoded && !decoded && filter_setting.decode {
+    // BS4K channels are TLV passthrough (1 TLV = 1 service) and the stream is
+    // already decoded, so the TS-only mirakc-arib decode-filter must be
+    // skipped even when `decode=true`.  Content-Type stays `video/MP2T` for
+    // Mirakurun-client compatibility either way.
+    if !is_tlv_passthrough(channel.channel_type) && !decoded && filter_setting.decode {
         builder.add_decode_filter(&config.filters.decode_filter)?;
     }
     builder.add_post_filters(&config.post_filters, &filter_setting.post_filters)?;
     Ok(builder.build())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_user() -> TunerUser {
+        TunerUser {
+            info: TunerUserInfo::Web {
+                id: "test".to_string(),
+                agent: None,
+            },
+            priority: 0.into(),
+            stream_setting: Default::default(),
+        }
+    }
+
+    #[test]
+    fn test_build_filters_bs4k_passthrough() {
+        let mut config = Config::default();
+        config.filters.decode_filter.command = "dec".to_string();
+
+        let user = create_user();
+        let filter_setting = FilterSetting {
+            decode: true,
+            pre_filters: vec![],
+            post_filters: vec![],
+        };
+
+        // A GR channel gets the TS-only decode filter.
+        let channel = channel_gr!("gr", "0");
+        let (filters, content_type, _) =
+            build_filters(&config, &user, &filter_setting, &channel, false).unwrap();
+        assert_eq!(filters, vec!["dec"]);
+        assert_eq!(content_type, "video/MP2T");
+
+        // A BS4K channel is TLV passthrough, so no filter is applied.
+        let channel = channel_bs4k!("bs4k", "0xB110");
+        let (filters, _, _) =
+            build_filters(&config, &user, &filter_setting, &channel, false).unwrap();
+        assert!(filters.is_empty());
+    }
 }
