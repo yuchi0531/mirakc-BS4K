@@ -788,6 +788,13 @@ from all defined tuners.
 * extra-args (optional)
   * Extra arguments used in the tuner command instead of the `extra-args` of
     the channel for this route only
+* tsmf-rel-ts (optional)
+  * A TSMF (MPEG-TS Multi Frame) relative TS number between 1 and 15
+  * Overrides the channel's `tsmf-rel-ts` for this route only.  When omitted,
+    the channel's `tsmf-rel-ts` is inherited (there is no way to explicitly
+    clear it)
+  * This allows a CATV TSMF route and a local plain-MPEG-TS route to coexist on
+    one channel: only the CATV route runs `filters.tsmf-filter`
 
 ```yaml
 # YAML
@@ -796,9 +803,11 @@ channels:
     type: CS
     channel: AT-X
     routes:
-      # First route: via CATV.
+      # CATV route: TSMF multiplexed, extract relative TS 3.
       - tuner: mirakurun-catv
-      # Second route: a local tuner.
+        tsmf-rel-ts: 3
+      # Local route: plain MPEG-TS, no TSMF filter (inherits the channel's,
+      # which is unset here).
       - tuner: ptx-s110
         channel: '13'           # Overrides the channel for this route only.
         extra-args: '--lnb 15'  # Overrides the extra-args for this route only.
@@ -811,11 +820,13 @@ name = "AT-X"
 type = "CS"
 channel = "AT-X"
 
-# First route: via CATV.
+# CATV route: TSMF multiplexed, extract relative TS 3.
 [[channels.routes]]
 tuner = "mirakurun-catv"
+tsmf-rel-ts = 3
 
-# Second route: a local tuner.
+# Local route: plain MPEG-TS, no TSMF filter (inherits the channel's,
+# which is unset here).
 [[channels.routes]]
 tuner = "ptx-s110"
 channel = "13"
@@ -854,10 +865,10 @@ Notes:
   used unless it is listed in `routes`.
 * `routes` is resolved every time mirakc activates a tuner for the channel,
   including tuner activations for EPG jobs and recordings.  The per-route
-  `channel` and `extra-args` are applied to the tuner command, and the
-  effective channel is also used for the tuner-filter.  Channel definitions
-  returned by the Web API and stored in EPG data and recording metadata keep
-  the original `channel` and `extra-args`.
+  `channel`, `extra-args` and `tsmf-rel-ts` are applied to the effective
+  channel, which is used for the tuner command and the tuner-filter.  Channel
+  definitions returned by the Web API and stored in EPG data and recording
+  metadata keep the original `channel` and `extra-args`.
 * Services are identified by NID and SID.  If a passthrough retransmission
   provides the same service, mirakc treats it as the same service regardless of
   the route, so EPG data and recordings are integrated naturally.

@@ -1676,6 +1676,7 @@ impl ChannelRouteConfig {
                 .extra_args
                 .clone()
                 .unwrap_or_else(|| channel.extra_args.clone()),
+            tsmf_rel_ts: self.tsmf_rel_ts.or(channel.tsmf_rel_ts),
             ..channel.clone()
         }
     }
@@ -2609,6 +2610,7 @@ mod tests {
             tuner: "tuner".to_string(),
             channel: Some("overridden".to_string()),
             extra_args: Some("--args".to_string()),
+            tsmf_rel_ts: None,
         };
         let effective = route.effective_channel(&channel);
         assert_eq!(effective.channel, "overridden");
@@ -2620,11 +2622,41 @@ mod tests {
             tuner: "tuner".to_string(),
             channel: None,
             extra_args: None,
+            tsmf_rel_ts: None,
         };
         let effective = route.effective_channel(&channel);
         assert_eq!(effective.channel, "original");
         assert_eq!(effective.extra_args, "");
         assert_eq!(effective, channel);
+    }
+
+    #[test]
+    fn test_route_effective_channel_overrides_tsmf_rel_ts() {
+        // A route without `tsmf-rel-ts` inherits the channel's value.
+        let mut channel = channel_gr!("name", "original");
+        channel.tsmf_rel_ts = Some(3);
+        let route = ChannelRouteConfig {
+            tuner: "tuner".to_string(),
+            channel: None,
+            extra_args: None,
+            tsmf_rel_ts: None,
+        };
+        assert_eq!(route.effective_channel(&channel).tsmf_rel_ts, Some(3));
+
+        // A route with `tsmf-rel-ts` overrides the channel's value.
+        let route = ChannelRouteConfig {
+            tuner: "tuner".to_string(),
+            channel: None,
+            extra_args: None,
+            tsmf_rel_ts: Some(5),
+        };
+        assert_eq!(route.effective_channel(&channel).tsmf_rel_ts, Some(5));
+
+        // A route with `tsmf-rel-ts` and a channel without one yields the
+        // route's value (the local-route scenario is covered by the first
+        // case above).
+        let channel = channel_gr!("name", "original");
+        assert_eq!(route.effective_channel(&channel).tsmf_rel_ts, Some(5));
     }
 
     #[test]
@@ -2637,6 +2669,7 @@ mod tests {
             tuner: "tuner".to_string(),
             channel: Some("overridden".to_string()),
             extra_args: Some("--args".to_string()),
+            tsmf_rel_ts: None,
         };
 
         let command = tuner
@@ -2649,6 +2682,7 @@ mod tests {
             tuner: "tuner".to_string(),
             channel: None,
             extra_args: None,
+            tsmf_rel_ts: None,
         };
         let command = tuner
             .make_command(&route.effective_channel(&channel))
@@ -3774,6 +3808,56 @@ mod tests {
         channel.tsmf_rel_ts = Some(3);
         let filters =
             TunerManager::make_tuner_filter_commands(&tuner, &channel, &full_config).unwrap();
+        assert_eq!(
+            filters,
+            vec!["tuner-filter", "mirakc-arib filter-tsmf --relative-ts=3"]
+        );
+    }
+
+    #[test]
+    fn test_route_tsmf_rel_ts_reaches_tuner_filter_pipeline() {
+        // The per-route `tsmf-rel-ts` must be visible to the tuner-filter
+        // pipeline through `effective_channel`, so that a CATV TSMF route and
+        // a local plain-TS route can coexist on one channel.
+        let config = create_config("true".to_string());
+        let tuner = Tuner::new(0, &config);
+        let mut full_config = Config::default();
+        full_config.filters.service_filter.command = "true".to_string();
+        full_config.filters.program_filter.command = "true".to_string();
+        full_config.filters.tuner_filter.command = "tuner-filter".to_string();
+
+        // A channel with no top-level `tsmf-rel-ts`.
+        let channel = create_channel("C17");
+
+        // The local route does not set `tsmf-rel-ts`: no tsmf-filter.
+        let local_route = ChannelRouteConfig {
+            tuner: "tuner".to_string(),
+            channel: None,
+            extra_args: None,
+            tsmf_rel_ts: None,
+        };
+        let filters = TunerManager::make_tuner_filter_commands(
+            &tuner,
+            &local_route.effective_channel(&channel),
+            &full_config,
+        )
+        .unwrap();
+        assert_eq!(filters, vec!["tuner-filter"]);
+
+        // The CATV route sets `tsmf-rel-ts: 3`: the tsmf-filter is inserted
+        // even though the channel itself has no `tsmf-rel-ts`.
+        let catv_route = ChannelRouteConfig {
+            tuner: "tuner".to_string(),
+            channel: None,
+            extra_args: None,
+            tsmf_rel_ts: Some(3),
+        };
+        let filters = TunerManager::make_tuner_filter_commands(
+            &tuner,
+            &catv_route.effective_channel(&channel),
+            &full_config,
+        )
+        .unwrap();
         assert_eq!(
             filters,
             vec!["tuner-filter", "mirakc-arib filter-tsmf --relative-ts=3"]

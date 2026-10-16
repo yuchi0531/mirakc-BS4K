@@ -315,6 +315,12 @@ impl Config {
                         "config.channels[{i}].routes[{j}].channel: must be a non-empty string"
                     );
                 }
+                if let Some(tsmf_rel_ts) = route.tsmf_rel_ts {
+                    validate!(
+                        (1..=15).contains(&tsmf_rel_ts),
+                        "config.channels[{i}].routes[{j}].tsmf-rel-ts: must be between 1 and 15"
+                    );
+                }
                 if !self.tuners.iter().any(|tuner| tuner.name == route.tuner) {
                     fail!(
                         "config.channels[{i}].routes[{j}]: \
@@ -572,6 +578,11 @@ pub struct ChannelRouteConfig {
     pub channel: Option<String>,
     #[serde(default)]
     pub extra_args: Option<String>,
+    /// TSMF (MPEG-TS Multi Frame) relative TS number for this route only.
+    ///
+    /// Overrides the channel's `tsmf-rel-ts` for this route when present.
+    #[serde(default, alias = "tsmfRelTs")]
+    pub tsmf_rel_ts: Option<u8>,
 }
 
 impl ChannelConfig {
@@ -2709,11 +2720,13 @@ mod tests {
                     tuner: "gr".to_string(),
                     channel: None,
                     extra_args: None,
+                    tsmf_rel_ts: None,
                 },
                 ChannelRouteConfig {
                     tuner: "catv".to_string(),
                     channel: Some("42".to_string()),
                     extra_args: Some("--args".to_string()),
+                    tsmf_rel_ts: None,
                 },
             ],
         };
@@ -2783,6 +2796,7 @@ mod tests {
                 tuner: "a".to_string(),
                 channel: None,
                 extra_args: None,
+                tsmf_rel_ts: None,
             }],
         };
         // Routes are not merged.  The first definition wins like extra-args.
@@ -4982,6 +4996,77 @@ mod tests {
         )
         .unwrap();
         config.validate(0);
+    }
+
+    #[test]
+    fn test_config_route_tsmf_rel_ts_is_parsed() {
+        // `tsmf-rel-ts` on a route is accepted, including the alias
+        // `tsmfRelTs`, while a route without it defaults to `None`.
+        let config = serde_norway::from_str::<ChannelConfig>(
+            r#"
+            name: catv
+            type: GR
+            channel: '13'
+            routes:
+              - tuner: tuner
+                tsmf-rel-ts: 3
+              - tuner: tuner
+                tsmfRelTs: 7
+              - tuner: tuner
+        "#,
+        )
+        .unwrap();
+        assert_eq!(config.routes[0].tsmf_rel_ts, Some(3));
+        assert_eq!(config.routes[1].tsmf_rel_ts, Some(7));
+        assert_eq!(config.routes[2].tsmf_rel_ts, None);
+    }
+
+    #[test]
+    #[should_panic(expected = "config.channels[0].routes[0].tsmf-rel-ts: must be between 1 and 15")]
+    fn test_config_validate_route_tsmf_rel_ts_zero() {
+        let config = serde_norway::from_str::<Config>(
+            r#"
+            channels:
+              - name: catv
+                type: GR
+                channel: '13'
+                routes:
+                  - tuner: tuner
+                    tsmf-rel-ts: 0
+            tuners:
+              - name: tuner
+                types: [GR]
+                command: cat /dev/null
+            resource:
+              strings-yaml: /bin/sh
+        "#,
+        )
+        .unwrap();
+        config.validate(true);
+    }
+
+    #[test]
+    #[should_panic(expected = "config.channels[0].routes[0].tsmf-rel-ts: must be between 1 and 15")]
+    fn test_config_validate_route_tsmf_rel_ts_too_large() {
+        let config = serde_norway::from_str::<Config>(
+            r#"
+            channels:
+              - name: catv
+                type: GR
+                channel: '13'
+                routes:
+                  - tuner: tuner
+                    tsmf-rel-ts: 16
+            tuners:
+              - name: tuner
+                types: [GR]
+                command: cat /dev/null
+            resource:
+              strings-yaml: /bin/sh
+        "#,
+        )
+        .unwrap();
+        config.validate(true);
     }
 
     #[test]
