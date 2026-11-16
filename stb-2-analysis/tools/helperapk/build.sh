@@ -16,7 +16,7 @@ echo "[1/6] javac"
 javac -source 11 -target 11 -Xlint:none \
     -cp "$ANDROID_JAR" \
     -d "$WORK/classes" \
-    "$HERE/src/com/probe/rext/MainActivity.java"
+    $(find "$HERE/src" -name '*.java')
 
 echo "[2/6] d8"
 "$BT/d8" --lib "$ANDROID_JAR" --min-api 23 \

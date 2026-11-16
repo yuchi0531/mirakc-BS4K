@@ -40,6 +40,8 @@ public class MainActivity extends Activity {
     File outFile;
     File extFile;
     boolean finished = false;
+    SsdpResponder ssdpResponder;
+    long holdMs = 75000;
 
     final ServiceConnection conn = new ServiceConnection() {
         @Override
@@ -94,6 +96,25 @@ public class MainActivity extends Activity {
         TextView tv = new TextView(this);
         tv.setText("REXT probe running - see logcat tag REXT");
         setContentView(tv);
+
+        // Optional: how long to keep the process (and the SSDP responder) alive.
+        if (getIntent() != null) {
+            String h = getIntent().getStringExtra("hold_ms");
+            if (h != null && !h.trim().isEmpty()) {
+                try { holdMs = Long.parseLong(h.trim()); } catch (Throwable ignore) {}
+            }
+        }
+        log("holdMs=" + holdMs);
+
+        // Start a local SSDP responder so the STB's own M-SEARCH (multicast on its
+        // subnet) is answered with our host DMS LOCATION, enabling discovery.
+        try {
+            ssdpResponder = new SsdpResponder();
+            ssdpResponder.start();
+            log("SSDP responder thread started");
+        } catch (Throwable t) {
+            log("SSDP responder start threw=" + t);
+        }
 
         File files = getFilesDir();
         outFile = new File(files, "out.txt");
@@ -153,7 +174,7 @@ public class MainActivity extends Activity {
         // Watchdog in case onServiceConnected never arrives.
         new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
             @Override public void run() { finishAfterDelay(); }
-        }, 20000);
+        }, holdMs);
     }
 
     void doCalls(IBinder service) {
@@ -173,8 +194,9 @@ public class MainActivity extends Activity {
                 } catch (Throwable t) {
                     log("cmd.txt read error=" + t);
                 }
-                log("cmd.txt batch DONE");
-                runOnUiThread(new Runnable() { @Override public void run() { finishAfterDelay(); } });
+                log("cmd.txt batch DONE (keeping SSDP responder alive for holdMs)");
+                // Do NOT finish here: the local SSDP responder must stay alive so the
+                // STB can discover our DMS. The watchdog above will finish after holdMs.
                 return;
             }
         }
@@ -251,6 +273,9 @@ public class MainActivity extends Activity {
     void finishAfterDelay() {
         if (finished) return;
         finished = true;
+        if (ssdpResponder != null) {
+            try { ssdpResponder.stopResponder(); } catch (Throwable t) { log("ssdp stop threw=" + t); }
+        }
         try { unbindService(conn); } catch (Throwable t) { log("unbind threw=" + t); }
         try { unbindService(uploadConn); } catch (Throwable t) { log("UPLOAD unbind threw=" + t); }
         new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
