@@ -1,0 +1,21 @@
+=== Phase18 Round25: pipe kmalloc-128 adjacency spill detector ===
+pid=6668
+[cfg] L=129 OOB=2 npipes=200 mode=0 seed=0
+[cfg] rd_size=64
+[order] pipes -> HID
+  [spray] pipes made=200 sized8192=200 size_bad=0 written64=200
+open(/dev/uhid) fd=404
+write(CREATE2) ret=4376
+  EVENT START
+  EVENT GET_REPORT id=1 rnum=3
+  >>> SPILL REPLY id=1 rnum=3 size=2 data[0]=4
+  reply write ret=4376
+  EVENT OPEN
+write(DESTROY) ret=4376
+  EVENT type=5
+  EVENT type=3
+[readback]
+  [readback] pipes=200 got64=200 err=0 CHANGED_PIPES=0
+[result] saw_getreport=1 saw_open=1 read_errors=0
+[VERDICT] NO_PIPE_CHANGE
+=== done ===
