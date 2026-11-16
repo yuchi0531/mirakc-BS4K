@@ -1,0 +1,7 @@
+=== Phase19 Round26: deterministic kmalloc-128 spill detector ===
+pid=4415
+[cfg] L=129 OOB=2 npipes=-208 mode=1 seed=0 cpupin=-1 npre=600
+[cfg] rd_size=64
+  [slabinfo] T0 boot: kmalloc-128        69445  71936    128   32    1 : tunables    0    0    0 : slabdata   2248   2248      0
+[order] HID -> pipes -> reply (SAFE readback)
+[groom] pre-pipes before HID:

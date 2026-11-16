@@ -1,0 +1,27 @@
+=== Phase19 Round26: deterministic kmalloc-128 spill detector ===
+pid=4503
+[cfg] L=129 OOB=2 npipes=200 mode=1 seed=7 cpupin=-1 npre=0
+[cfg] rd_size=64
+  [slabinfo] T0 boot: kmalloc-128        70664  71968    128   32    1 : tunables    0    0    0 : slabdata   2249   2249      0
+[order] HID -> pipes -> reply (SAFE readback)
+open(/dev/uhid) fd=3
+write(CREATE2) ret=4376
+  EVENT START
+  EVENT GET_REPORT id=1 rnum=3
+  [defer] reply withheld
+  [slabinfo] T1 GET_REPORT captured (HID buf alive): kmalloc-128        70682  71968    128   32    1 : tunables    0    0    0 : slabdata   2249   2249      0
+  [spray] +pipes=200 sized8192=200 size_bad=0 written64=200
+  [slabinfo] T2 after spray (before reply): kmalloc-128        70893  71968    128   32    1 : tunables    0    0    0 : slabdata   2249   2249      0
+  >>> SPILL REPLY id=1 rnum=3 size=2 data[0]=4
+  reply write ret=4376
+  EVENT OPEN
+  [slabinfo] T3 after spill: kmalloc-128        71158  71968    128   32    1 : tunables    0    0    0 : slabdata   2249   2249      0
+write(DESTROY) ret=4376
+  EVENT type=5
+  EVENT type=3
+  [slabinfo] T4 after DESTROY: kmalloc-128        71217  71968    128   32    1 : tunables    0    0    0 : slabdata   2249   2249      0
+[readback]
+  [readback] checked=200 got64=200 err=0 CHANGED_PIPES=0
+[result] saw_getreport=1 saw_open=1 read_errors=0
+[VERDICT] NO_PIPE_CHANGE
+=== done ===
