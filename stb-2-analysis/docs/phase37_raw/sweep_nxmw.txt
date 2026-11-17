@@ -1,0 +1,2 @@
+dev=/dev/nxmw fd=3 count=106
+--- sweep done ---
