@@ -1,0 +1,9 @@
+DEVICE /dev/nexusmem
+OFF byte=0xffffff8001bea800 pgoff=0xffffff8001bea mmap=0xffffffffffffffea err=-22
+OFF byte=0xffffff8001bea000 pgoff=0xffffff8001bea mmap=0xfffffffffffffff4 err=-12
+OFF byte=0xffffff8001bea pgoff=0xffffff8001 mmap=0xffffffffffffffea err=-22
+OFF byte=0x1bea800 pgoff=0x1bea mmap=0xffffffffffffffea err=-22
+OFF byte=0x1bea pgoff=0x1 mmap=0xffffffffffffffea err=-22
+OFF byte=0xbb514000 pgoff=0xbb514 mmap=0xfffffffffffffff4 err=-12
+OFF byte=0xb1157200 pgoff=0xb1157 mmap=0xffffffffffffffea err=-22
+OFF byte=0xacd9c000 pgoff=0xacd9c mmap=0xfffffffffffffff4 err=-12
