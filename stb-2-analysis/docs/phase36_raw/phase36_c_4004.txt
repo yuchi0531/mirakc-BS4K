@@ -1,2 +1,0 @@
-fd=3
-HIST (errcode:count): -13:248 -25:8 

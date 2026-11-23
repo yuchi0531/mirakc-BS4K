@@ -1,2 +1,0 @@
-dev=/dev/nexusmem fd=3 count=106
---- sweep done ---

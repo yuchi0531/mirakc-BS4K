@@ -1,6 +1,0 @@
-DEVICE /dev/nxwk
-OFF byte=0xffffff8001bea000 pgoff=0xffffff8001bea open=-13
-OFF byte=0x1bea800 pgoff=0x1bea open=-13
-OFF byte=0xbb514000 pgoff=0xbb514 open=-13
-OFF byte=0xb1157200 pgoff=0xb1157 open=-13
-OFF byte=0xacd9c000 pgoff=0xacd9c open=-13
